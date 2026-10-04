@@ -1656,8 +1656,9 @@ static void changeHourMode(lv_event_t *) {
 }
 
 static void adjustButton(lv_obj_t *parent, const char *text, int x, int y,
-                         lv_event_cb_t callback, int delta) {
-  lv_obj_t *control = button(parent, text, x, y, 44, 34, noAction);
+                         lv_event_cb_t callback, int delta, int width = 44,
+                         int height = 34) {
+  lv_obj_t *control = button(parent, text, x, y, width, height, noAction);
   lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, (void *)(intptr_t)delta);
 }
 
@@ -1743,34 +1744,56 @@ static void buildSettings() {
   lv_obj_t *stocks = settingsPages[3];
   lv_obj_t *audio = settingsPages[4];
   lv_obj_t *radio = settingsPages[5];
-  label(general, "亮度", 20, 12, 65);
-  adjustButton(general, "-", 103, 5, changeBrightness, -5);
-  brightnessValueLabel = label(general, "", 158, 9, 78, 20);
-  lv_obj_set_style_text_align(brightnessValueLabel, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_t *generalCards[6];
+  for (int i = 0; i < 6; ++i) {
+    lv_obj_t *card = lv_obj_create(general);
+    generalCards[i] = card;
+    lv_obj_set_pos(card, 12 + (i % 3) * 206, (i / 3) * 64);
+    lv_obj_set_size(card, i % 3 == 2 ? 204 : 194, 61);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_set_style_radius(card, 7, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x121916), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x28372F), 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+  }
+  label(generalCards[0], "亮度", 10, 5, 65);
+  brightnessValueLabel = label(generalCards[0], "", 92, 5, 90);
+  lv_obj_set_style_text_align(brightnessValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(brightnessValueLabel, "%d%%", cfg.brightness);
-  adjustButton(general, "+", 247, 5, changeBrightness, 5);
-  label(general, "省電", 20, 52, 65);
-  adjustButton(general, "-", 103, 45, changeSleep, -5);
-  sleepValueLabel = label(general, "", 158, 49, 78, 20);
-  lv_obj_set_style_text_align(sleepValueLabel, LV_TEXT_ALIGN_CENTER, 0);
+  adjustButton(generalCards[0], "-", 9, 27, changeBrightness, -5, 80, 29);
+  adjustButton(generalCards[0], "+", 105, 27, changeBrightness, 5, 80, 29);
+
+  label(generalCards[1], "省電", 10, 5, 65);
+  sleepValueLabel = label(generalCards[1], "", 92, 5, 90);
+  lv_obj_set_style_text_align(sleepValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(sleepValueLabel, "%d 分", cfg.sleepMinutes);
-  adjustButton(general, "+", 247, 45, changeSleep, 5);
-  label(general, "音量", 20, 92, 65);
-  adjustButton(general, "-", 103, 85, changeVolume, -1);
-  volumeValueLabel = label(general, "", 158, 89, 78, 20);
-  lv_obj_set_style_text_align(volumeValueLabel, LV_TEXT_ALIGN_CENTER, 0);
+  adjustButton(generalCards[1], "-", 9, 27, changeSleep, -5, 80, 29);
+  adjustButton(generalCards[1], "+", 105, 27, changeSleep, 5, 80, 29);
+
+  label(generalCards[2], "音量", 10, 5, 65);
+  volumeValueLabel = label(generalCards[2], "", 102, 5, 90);
+  lv_obj_set_style_text_align(volumeValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(volumeValueLabel, "%d%%", cfg.volume);
-  adjustButton(general, "+", 247, 85, changeVolume, 1);
-  button(general, "日期時間", 350, 8, 126, 43, editDateTime);
-  hourModeButton = button(general, cfg.hour12 ? "12 小時" : "24 小時", 488, 8, 126, 43, changeHourMode);
-  label(general, "內容輪播", 350, 69, 80);
-  adjustButton(general, "-", 435, 62, changeHomeCarouselInterval, -5);
-  carouselValueLabel = label(general, "", 485, 68, 78);
-  lv_obj_set_style_text_align(carouselValueLabel, LV_TEXT_ALIGN_CENTER, 0);
+  adjustButton(generalCards[2], "-", 9, 27, changeVolume, -1, 85, 29);
+  adjustButton(generalCards[2], "+", 110, 27, changeVolume, 1, 85, 29);
+
+  label(generalCards[3], "日期與時間", 10, 5, 174);
+  button(generalCards[3], "設定時間", 9, 27, 92, 29, editDateTime);
+  hourModeButton = button(generalCards[3], cfg.hour12 ? "12 小時" : "24 小時",
+                          105, 27, 80, 29, changeHourMode);
+
+  label(generalCards[4], "內容輪播", 10, 5, 90);
+  carouselValueLabel = label(generalCards[4], "", 102, 5, 80);
+  lv_obj_set_style_text_align(carouselValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(carouselValueLabel, "%d 秒", cfg.carouselSeconds);
-  adjustButton(general, "+", 570, 62, changeHomeCarouselInterval, 5);
-  otaButton = button(general, "檢查更新", 350, 99, 126, 29, otaButtonClicked);
-  otaStatusLabel = label(general, DESKDOCK_VERSION, 488, 103, 140);
+  adjustButton(generalCards[4], "-", 9, 27, changeHomeCarouselInterval, -5, 80, 29);
+  adjustButton(generalCards[4], "+", 105, 27, changeHomeCarouselInterval, 5, 80, 29);
+
+  label(generalCards[5], "韌體更新", 10, 5, 82);
+  otaStatusLabel = label(generalCards[5], DESKDOCK_VERSION, 92, 5, 100);
+  lv_obj_set_style_text_align(otaStatusLabel, LV_TEXT_ALIGN_RIGHT, 0);
+  otaButton = button(generalCards[5], "檢查更新", 9, 27, 186, 29, otaButtonClicked);
 
   networkLabel = label(network, "未連線", 18, 5, 590);
   button(network, "搜尋", 18, 31, 110, 30, scanWifi);
