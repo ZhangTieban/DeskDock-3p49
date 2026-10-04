@@ -1,0 +1,8 @@
+build*/
+firmware/
+mockups/
+*.bak
+__pycache__/
+*.pyc
+.arduino15/
+release_assets/

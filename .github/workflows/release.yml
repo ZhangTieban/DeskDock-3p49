@@ -1,0 +1,54 @@
+name: Build and publish firmware
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: DeskDock_3p49
+      - uses: arduino/setup-arduino-cli@v2
+        with:
+          version: "1.x"
+      - name: Install pinned board and libraries
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.3.7 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli lib install lvgl@9.5.0 ESP8266Audio@2.4.1
+      - name: Build app and custom partition table
+        run: |
+          arduino-cli compile \
+            --fqbn 'esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=huge_app' \
+            --build-path build-ci DeskDock_3p49
+      - name: Create release assets
+        run: |
+          python3 DeskDock_3p49/tools/package_release.py --bin build-ci/DeskDock_3p49.ino.bin --out release_assets
+          test "${GITHUB_REF_NAME}" = "v$(python3 -c 'import json; print(json.load(open("release_assets/version.json"))["version"])')" || {
+            echo 'Tag and firmware version differ' >&2
+            exit 1
+          }
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deskdock-firmware
+          path: |
+            release_assets/firmware.bin
+            release_assets/version.json
+            build-ci/*.partitions.bin
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            release_assets/firmware.bin
+            release_assets/version.json
+          fail_on_unmatched_files: true

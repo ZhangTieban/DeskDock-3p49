@@ -1,0 +1,16 @@
+#pragma once
+#include <lvgl.h>
+LV_FONT_DECLARE(desk_font_16)
+LV_FONT_DECLARE(desk_font_16_bold)
+LV_FONT_DECLARE(desk_font_14_bold)
+LV_FONT_DECLARE(desk_font_10_bold)
+LV_FONT_DECLARE(desk_font_18)
+LV_FONT_DECLARE(desk_font_20)
+LV_FONT_DECLARE(desk_font_20_bold)
+LV_FONT_DECLARE(desk_font_24_weather)
+LV_FONT_DECLARE(desk_font_24_moon)
+LV_FONT_DECLARE(desk_font_34)
+LV_FONT_DECLARE(desk_font_58)
+LV_FONT_DECLARE(desk_font_70)
+LV_FONT_DECLARE(desk_font_86)
+LV_FONT_DECLARE(desk_font_93)
