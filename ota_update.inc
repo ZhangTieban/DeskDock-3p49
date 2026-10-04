@@ -85,6 +85,8 @@ static bool otaHttpFollow(const String &initialUrl, http_event_handle_cb callbac
     config.crt_bundle_attach = esp_crt_bundle_attach;
     config.timeout_ms = timeoutMs;
     config.buffer_size = 4096;
+    // GitHub's signed asset URL can exceed the default 512-byte TX buffer.
+    config.buffer_size_tx = (int)url.length() + 1024;
     config.disable_auto_redirect = true;
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) break;
@@ -100,7 +102,8 @@ static bool otaHttpFollow(const String &initialUrl, http_event_handle_cb callbac
          status == 307 || status == 308) &&
         location->startsWith("https://") && location->length() <= 4096) {
       url = *location;
-      Serial.printf("[OTA] HTTP redirect %d, hop %d\n", status, hop + 1);
+      Serial.printf("[OTA] HTTP redirect %d, hop %d, url bytes=%u\n",
+                    status, hop + 1, (unsigned)url.length());
       continue;
     }
     Serial.printf("[OTA] HTTP result=%d status=%d redirect=%u\n",
