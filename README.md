@@ -11,7 +11,11 @@ Open-Meteo 天氣、臺北股市與網路電台，設定頁提供 Wi-Fi、天氣
 - ESP32-S3、16 MB Flash、OPI PSRAM、USB CDC On Boot
 - sketch 目錄中的 `partitions.csv` 會建立 4 MiB × 2 個 OTA app 分區。
 
+Arduino 要求 sketch 目錄與主 `.ino` 同名，因此 clone 時指定目錄名：
+
 ```sh
+git clone https://github.com/ZhangTieban/DeskDock-3p49.git DeskDock_3p49
+cd DeskDock_3p49
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=huge_app' \
   --build-path build-ci .

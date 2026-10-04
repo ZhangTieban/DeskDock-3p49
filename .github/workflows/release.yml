@@ -32,10 +32,12 @@ jobs:
       - name: Create release assets
         run: |
           python3 DeskDock_3p49/tools/package_release.py --bin build-ci/DeskDock_3p49.ino.bin --out release_assets
-          test "${GITHUB_REF_NAME}" = "v$(python3 -c 'import json; print(json.load(open("release_assets/version.json"))["version"])')" || {
-            echo 'Tag and firmware version differ' >&2
-            exit 1
-          }
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            test "${GITHUB_REF_NAME}" = "v$(python3 -c 'import json; print(json.load(open("release_assets/version.json"))["version"])')" || {
+              echo 'Tag and firmware version differ' >&2
+              exit 1
+            }
+          fi
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
