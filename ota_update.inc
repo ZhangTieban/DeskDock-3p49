@@ -332,6 +332,8 @@ static void refreshOtaUi() {
 
 static void otaCheckFirstBoot() {
   const esp_partition_t *running = esp_ota_get_running_partition();
+  Serial.printf("[OTA] running=%s version=%s\n",
+                running ? running->label : "unknown", DESKDOCK_VERSION);
   esp_ota_img_states_t state;
   otaPendingVerify = running &&
       esp_ota_get_state_partition(running, &state) == ESP_OK &&
