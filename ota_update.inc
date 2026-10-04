@@ -42,12 +42,84 @@ static bool otaIsNewer(const char *candidate) {
   return false;
 }
 
-static bool otaReadManifest() {
+struct OtaManifestResponse {
   String body;
+  String location;
+  bool overflow = false;
+};
+
+static void otaCaptureRedirect(esp_http_client_event_t *event, String *location) {
+  if (event->event_id == HTTP_EVENT_ON_HEADER && event->header_key &&
+      String(event->header_key).equalsIgnoreCase("Location") && event->header_value)
+    *location = event->header_value;
+}
+
+static esp_err_t otaManifestHttpEvent(esp_http_client_event_t *event) {
+  auto *response = static_cast<OtaManifestResponse *>(event->user_data);
+  otaCaptureRedirect(event, &response->location);
+  if (event->event_id != HTTP_EVENT_ON_DATA ||
+      esp_http_client_get_status_code(event->client) != 200) return ESP_OK;
+  if (response->body.length() + event->data_len > 2048) {
+    response->overflow = true;
+    return ESP_FAIL;
+  }
+  response->body.concat((const char *)event->data, event->data_len);
+  return ESP_OK;
+}
+
+// GitHub Release assets redirect to a signed CDN URL. Recreate the client at
+// each hop so a TLS connection to the previous host does not stay allocated.
+static bool otaHttpFollow(const String &initialUrl, http_event_handle_cb callback,
+                          void *context, String *location, int timeoutMs,
+                          int *finalStatus) {
+  if (xSemaphoreTake(networkHttpMutex, pdMS_TO_TICKS(15000)) != pdTRUE) return false;
+  String url = initialUrl;
+  bool success = false;
+  *finalStatus = 0;
+  for (int hop = 0; hop < 5; ++hop) {
+    location->remove(0);
+    esp_http_client_config_t config = {};
+    config.url = url.c_str();
+    config.event_handler = callback;
+    config.user_data = context;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.timeout_ms = timeoutMs;
+    config.buffer_size = 4096;
+    config.disable_auto_redirect = true;
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) break;
+    const esp_err_t result = esp_http_client_perform(client);
+    const int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    *finalStatus = status;
+    if (result == ESP_OK && status == 200) {
+      success = true;
+      break;
+    }
+    if ((status == 301 || status == 302 || status == 303 ||
+         status == 307 || status == 308) &&
+        location->startsWith("https://") && location->length() <= 4096) {
+      url = *location;
+      Serial.printf("[OTA] HTTP redirect %d, hop %d\n", status, hop + 1);
+      continue;
+    }
+    Serial.printf("[OTA] HTTP result=%d status=%d redirect=%u\n",
+                  (int)result, status, (unsigned)location->length());
+    break;
+  }
+  xSemaphoreGive(networkHttpMutex);
+  return success;
+}
+
+static bool otaReadManifest() {
+  OtaManifestResponse response;
+  response.body.reserve(2048);
   const String url = String("https://github.com/") +
       DESKDOCK_GITHUB_REPOSITORY + "/releases/latest/download/version.json";
-  if (!getJson(url, 2048, &body)) return false;
-  cJSON *root = cJSON_Parse(body.c_str());
+  int status = 0;
+  if (!otaHttpFollow(url, otaManifestHttpEvent, &response, &response.location,
+                     10000, &status) || response.overflow) return false;
+  cJSON *root = cJSON_Parse(response.body.c_str());
   if (!root) return false;
   const char *board = jsonString(root, "board");
   const char *version = jsonString(root, "version");
@@ -95,11 +167,13 @@ struct OtaDownload {
   size_t received = 0;
   size_t expected = 0;
   bool failed = false;
+  String location;
 };
 
 static esp_err_t otaHttpEvent(esp_http_client_event_t *event) {
-  if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
   auto *transfer = static_cast<OtaDownload *>(event->user_data);
+  otaCaptureRedirect(event, &transfer->location);
+  if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
   if (esp_http_client_get_status_code(event->client) != 200) return ESP_OK;
   const size_t count = (size_t)event->data_len;
   if (!count || transfer->received > transfer->expected ||
@@ -152,35 +226,20 @@ static bool otaDownloadToSd() {
   OtaDownload transfer{&output, &sha, 0, otaManifest.size, false};
   const String url = String("https://github.com/") + DESKDOCK_GITHUB_REPOSITORY +
       "/releases/download/v" + otaManifest.version + "/firmware.bin";
-  esp_http_client_config_t config = {};
-  config.url = url.c_str();
-  config.event_handler = otaHttpEvent;
-  config.user_data = &transfer;
-  config.crt_bundle_attach = esp_crt_bundle_attach;
-  config.timeout_ms = 20000;
-  config.buffer_size = 4096;
   otaStage.store(OtaStage::Downloading);
-  esp_http_client_handle_t client = esp_http_client_init(&config);
-  esp_err_t result = ESP_FAIL;
   int status = 0;
-  if (client) {
-    if (xSemaphoreTake(networkHttpMutex, pdMS_TO_TICKS(15000)) == pdTRUE) {
-      result = esp_http_client_perform(client);
-      status = esp_http_client_get_status_code(client);
-      xSemaphoreGive(networkHttpMutex);
-    }
-    esp_http_client_cleanup(client);
-  }
+  const bool downloaded = otaHttpFollow(url, otaHttpEvent, &transfer,
+                                        &transfer.location, 20000, &status);
   output.flush();
   output.close();
   unsigned char digest[32];
   const int hashResult = mbedtls_sha256_finish(&sha, digest);
   mbedtls_sha256_free(&sha);
-  if (result != ESP_OK || status != 200 || transfer.failed ||
+  if (!downloaded || status != 200 || transfer.failed ||
       transfer.received != transfer.expected) {
     SD_MMC.remove("/update/firmware.tmp");
-    Serial.printf("[OTA] download result=%d http=%d bytes=%u expected=%u\n",
-                  (int)result, status, (unsigned)transfer.received,
+    Serial.printf("[OTA] download http=%d bytes=%u expected=%u\n",
+                  status, (unsigned)transfer.received,
                   (unsigned)transfer.expected);
     otaSetError(OtaError::Download, "firmware download incomplete");
     return false;
