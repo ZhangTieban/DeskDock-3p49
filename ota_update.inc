@@ -193,8 +193,9 @@ static esp_err_t otaHttpEvent(esp_http_client_event_t *event) {
 
 static bool otaDownloadToSd() {
   if (!otaSdMounted) {
-    otaSdMounted = SD_MMC.setPins(41, 39, 40) &&
-                   SD_MMC.begin("/sdcard", true, false);
+    otaSdMounted = deskFontSdMounted() ||
+                   (SD_MMC.setPins(41, 39, 40) &&
+                    SD_MMC.begin("/sdcard", true, false, BOARD_MAX_SDMMC_FREQ, 20));
   }
   if (!otaSdMounted || SD_MMC.cardType() == CARD_NONE) {
     if (otaSdMounted) SD_MMC.end();

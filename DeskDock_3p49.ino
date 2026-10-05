@@ -2524,6 +2524,7 @@ void setup() {
   lvgl_port_init();
   lcd_bl_pwm_bsp_init(backlightDuty(cfg.brightness));
   if (lvgl_port_lock(2000)) {
+    deskFontInitSd();
     buildHome(); buildSettings(); buildStockScreen();
     lv_screen_load(homeScreen);
     lv_mem_monitor_t lvMem;

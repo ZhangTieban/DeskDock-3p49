@@ -1,4 +1,6 @@
 #include "desk_font.h"
+#include <SD_MMC.h>
+#include <new>
 #include <cstring>
 
 struct DeskGlyph {
@@ -77,17 +79,114 @@ static lv_font_t makeFont(const DeskFontBlob *blob, int height, int base,
 
 #include "desk_font_data.inc"
 
-const lv_font_t desk_font_16 = makeFont(&desk_blob_16, 23, 5, &lv_font_montserrat_14);
-const lv_font_t desk_font_16_bold = makeFont(&desk_blob_16_bold, 23, 5, &desk_font_16);
-const lv_font_t desk_font_14_bold = makeFont(&desk_blob_14_bold, 20, 4, &desk_font_16_bold);
-const lv_font_t desk_font_10_bold = makeFont(&desk_blob_10_bold, 15, 3, &desk_font_16);
-const lv_font_t desk_font_18 = makeFont(&desk_blob_18, 23, 5, &desk_font_16);
-const lv_font_t desk_font_20 = makeFont(&desk_blob_20, 29, 6, &desk_font_16);
-const lv_font_t desk_font_20_bold = makeFont(&desk_blob_20_bold, 26, 5, &desk_font_16_bold);
-const lv_font_t desk_font_24_weather = makeFont(&desk_blob_24_weather, 29, 5, &desk_font_16);
-const lv_font_t desk_font_24_moon = makeFont(&desk_blob_24_moon, 29, 5, &desk_font_16);
-const lv_font_t desk_font_34 = makeFont(&desk_blob_34, 42, 6, &desk_font_16);
-const lv_font_t desk_font_58 = makeFont(&desk_blob_58, 68, 8, &desk_font_16);
-const lv_font_t desk_font_70 = makeFont(&desk_blob_70, 80, 8, &lv_font_montserrat_14);
-const lv_font_t desk_font_86 = makeFont(&desk_blob_86, 98, 10, &lv_font_montserrat_14);
-const lv_font_t desk_font_93 = makeFont(&desk_blob_93, 105, 10, &lv_font_montserrat_14);
+lv_font_t desk_font_16 = makeFont(&desk_blob_16, 23, 5, &lv_font_montserrat_14);
+lv_font_t desk_font_16_bold = makeFont(&desk_blob_16_bold, 23, 5, &desk_font_16);
+lv_font_t desk_font_14_bold = makeFont(&desk_blob_14_bold, 20, 4, &desk_font_16_bold);
+lv_font_t desk_font_10_bold = makeFont(&desk_blob_10_bold, 15, 3, &desk_font_16);
+lv_font_t desk_font_18 = makeFont(&desk_blob_18, 23, 5, &desk_font_16);
+lv_font_t desk_font_20 = makeFont(&desk_blob_20, 29, 6, &desk_font_16);
+lv_font_t desk_font_20_bold = makeFont(&desk_blob_20_bold, 26, 5, &desk_font_16_bold);
+lv_font_t desk_font_24_weather = makeFont(&desk_blob_24_weather, 29, 5, &desk_font_16);
+lv_font_t desk_font_24_moon = makeFont(&desk_blob_24_moon, 29, 5, &desk_font_16);
+lv_font_t desk_font_34 = makeFont(&desk_blob_34, 42, 6, &desk_font_16);
+lv_font_t desk_font_58 = makeFont(&desk_blob_58, 68, 8, &desk_font_16);
+lv_font_t desk_font_70 = makeFont(&desk_blob_70, 80, 8, &lv_font_montserrat_14);
+lv_font_t desk_font_86 = makeFont(&desk_blob_86, 98, 10, &lv_font_montserrat_14);
+lv_font_t desk_font_93 = makeFont(&desk_blob_93, 105, 10, &lv_font_montserrat_14);
+
+static bool sdMounted = false;
+static lv_fs_drv_t sdFontFs;
+
+static bool sdFontReady(lv_fs_drv_t *) { return sdMounted; }
+
+static void *sdFontOpen(lv_fs_drv_t *, const char *path, lv_fs_mode_t mode) {
+  if (mode != LV_FS_MODE_RD) return nullptr;
+  File *file = new (std::nothrow) File(SD_MMC.open(path, FILE_READ));
+  if (!file) return nullptr;
+  if (!*file) { delete file; return nullptr; }
+  return file;
+}
+
+static lv_fs_res_t sdFontClose(lv_fs_drv_t *, void *handle) {
+  File *file = static_cast<File *>(handle);
+  file->close();
+  delete file;
+  return LV_FS_RES_OK;
+}
+
+static lv_fs_res_t sdFontRead(lv_fs_drv_t *, void *handle, void *buffer,
+                              uint32_t count, uint32_t *readCount) {
+  *readCount = static_cast<File *>(handle)->read(static_cast<uint8_t *>(buffer), count);
+  return LV_FS_RES_OK;
+}
+
+static lv_fs_res_t sdFontSeek(lv_fs_drv_t *, void *handle, uint32_t offset,
+                              lv_fs_whence_t whence) {
+  File *file = static_cast<File *>(handle);
+  SeekMode mode = whence == LV_FS_SEEK_CUR ? SeekCur :
+                  whence == LV_FS_SEEK_END ? SeekEnd : SeekSet;
+  return file->seek(offset, mode) ? LV_FS_RES_OK : LV_FS_RES_FS_ERR;
+}
+
+static lv_fs_res_t sdFontTell(lv_fs_drv_t *, void *handle, uint32_t *position) {
+  *position = static_cast<File *>(handle)->position();
+  return LV_FS_RES_OK;
+}
+
+bool deskFontSdMounted() { return sdMounted; }
+
+void deskFontInitSd() {
+  if (sdMounted) return;
+  if (!SD_MMC.setPins(41, 39, 40) ||
+      !SD_MMC.begin("/sdcard", true, false, BOARD_MAX_SDMMC_FREQ, 20)) {
+    Serial.println("[FONT] SD unavailable; using built-in glyphs");
+    return;
+  }
+  if (SD_MMC.cardType() == CARD_NONE) {
+    SD_MMC.end();
+    Serial.println("[FONT] SD unavailable; using built-in glyphs");
+    return;
+  }
+  sdMounted = true;
+  lv_fs_drv_init(&sdFontFs);
+  sdFontFs.letter = 'S';
+  sdFontFs.cache_size = 1024;
+  sdFontFs.ready_cb = sdFontReady;
+  sdFontFs.open_cb = sdFontOpen;
+  sdFontFs.close_cb = sdFontClose;
+  sdFontFs.read_cb = sdFontRead;
+  sdFontFs.seek_cb = sdFontSeek;
+  sdFontFs.tell_cb = sdFontTell;
+  lv_fs_drv_register(&sdFontFs);
+
+  struct FontFile { lv_font_t *font; const char *path; uint16_t size; };
+  static const FontFile files[] = {
+    {&desk_font_16, "/fonts/NotoSansTC-VF.ttf", 16},
+    {&desk_font_16_bold, "/fonts/NotoSansTC-VF.ttf", 16},
+    {&desk_font_14_bold, "/fonts/NotoSansTC-VF.ttf", 14},
+    {&desk_font_10_bold, "/fonts/NotoSansTC-VF.ttf", 10},
+    {&desk_font_18, "/fonts/NotoSansTC-VF.ttf", 18},
+    {&desk_font_20, "/fonts/NotoSansTC-VF.ttf", 20},
+    {&desk_font_20_bold, "/fonts/NotoSansTC-VF.ttf", 20},
+    {&desk_font_24_weather, "/fonts/NotoSansTC-VF.ttf", 24},
+    {&desk_font_24_moon, "/fonts/NotoSansTC-VF.ttf", 24},
+    {&desk_font_34, "/fonts/NotoSansTC-VF.ttf", 34},
+    {&desk_font_58, "/fonts/NotoSansTC-VF.ttf", 58},
+    {&desk_font_70, "/fonts/NotoSansTC-VF.ttf", 70},
+    {&desk_font_86, "/fonts/NotoSansTC-VF.ttf", 86},
+    {&desk_font_93, "/fonts/NotoSansTC-VF.ttf", 93},
+  };
+  unsigned loaded = 0;
+  for (const FontFile &entry : files) {
+    if (!SD_MMC.exists(entry.path)) continue;
+    String lvPath = String("S:") + entry.path;
+    lv_font_t *sdFont = lv_tiny_ttf_create_file_ex(
+        lvPath.c_str(), entry.size, LV_FONT_KERNING_NORMAL, 16);
+    if (!sdFont) continue;
+    sdFont->fallback = entry.font->fallback;
+    entry.font->fallback = sdFont;
+    ++loaded;
+  }
+  Serial.printf("[FONT] SD mounted, %u/%u font fallbacks ready\n", loaded,
+                (unsigned)(sizeof(files) / sizeof(files[0])));
+}

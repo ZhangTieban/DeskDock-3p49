@@ -45,6 +45,7 @@ jobs:
           path: |
             release_assets/firmware.bin
             release_assets/version.json
+            DeskDock_3p49/sdcard-fonts.zip
             build-ci/*.partitions.bin
       - name: Publish Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -53,4 +54,5 @@ jobs:
           files: |
             release_assets/firmware.bin
             release_assets/version.json
+            DeskDock_3p49/sdcard-fonts.zip
           fail_on_unmatched_files: true
