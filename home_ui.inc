@@ -287,6 +287,10 @@ static void refreshHomeRows(uint32_t now) {
   String weatherTitle = kCounties[cfg.counties[weatherSlot]];
   if (weatherTitle.length() <= 6) weatherTitle += " · 天氣";
   homeSetText(homeWeatherTitle, weatherTitle);
+  homeSetText(homeIndoorTemperature,
+              indoorValid ? String((int)lroundf(indoorTemperature)) + "°C" : String("--°C"));
+  homeSetText(homeIndoorHumidity,
+              indoorValid ? String((int)lroundf(indoorHumidity)) + "%" : String("--%"));
 }
 
 static lv_obj_t *homeControl(lv_obj_t *parent, const char *icon, const char *caption,

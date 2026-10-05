@@ -10,6 +10,7 @@ i2c_master_dev_handle_t rtc_dev_handle = NULL;
 i2c_master_dev_handle_t imu_dev_handle = NULL;
 i2c_master_dev_handle_t codec_dev_handle = NULL;
 i2c_master_dev_handle_t expander_dev_handle = NULL;
+i2c_master_dev_handle_t aht30_dev_handle = NULL;
 
 
 static uint32_t i2c_data_pdMS_TICKS = 0;
@@ -53,6 +54,9 @@ void i2c_master_Init(void)
   ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_port0_handle, &dev_cfg, &codec_dev_handle));
   dev_cfg.device_address = 0x20;
   ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_port0_handle, &dev_cfg, &expander_dev_handle));
+
+  dev_cfg.device_address = 0x38;
+  ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_port0_handle, &dev_cfg, &aht30_dev_handle));
 
   dev_cfg.device_address = I2C_TOUCH_ADDR;
   ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_port1_handle, &dev_cfg, &disp_touch_dev_handle));

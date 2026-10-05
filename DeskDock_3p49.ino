@@ -39,8 +39,10 @@ static constexpr int kWidth = 640;
 static constexpr int kHeight = 172;
 static constexpr int kBatteryPin = 4; // ADC1_CH3, 1:3 divider
 static constexpr int kPowerButtonPin = 16;
+static constexpr int kSettingsButtonPin = 0;
 static constexpr uint32_t kButtonDebounceMs = 35;
-static constexpr uint32_t kPowerHoldMs = 1500;
+static constexpr uint32_t kSettingsClickMaxMs = 1500;
+static constexpr uint32_t kPowerHoldMs = 5000;
 static constexpr uint32_t kPowerReleaseMs = 250;
 static constexpr uint32_t kWeatherPeriodMs = 30UL * 60UL * 1000UL;
 static constexpr uint32_t kStockPeriodMs = 60UL * 60UL * 1000UL;
@@ -119,6 +121,10 @@ struct RemoteData {
 static Config cfg;
 static RemoteData remote;
 static WeatherData weatherData[kWeatherSlots];
+static float indoorTemperature = 0, indoorHumidity = 0;
+static bool indoorValid = false;
+static bool aht30Pending = false;
+static uint32_t aht30StartedAt = 0, aht30NextAt = 0;
 static uint8_t weatherSlot = 0;
 static uint32_t lastWeatherFlip = 0;
 static SemaphoreHandle_t configMutex;
@@ -160,6 +166,7 @@ struct PhysicalButton {
   uint32_t changedMs = 0, pressedMs = 0;
 };
 static PhysicalButton powerButton{kPowerButtonPin};
+static PhysicalButton settingsButton{kSettingsButtonPin};
 static bool settingsTogglePending = false;
 static bool powerOffRequested = false;
 static uint32_t powerReleasedMs = 0;
@@ -607,7 +614,7 @@ static bool initPowerLatch() {
          expanderUpdate(0x01, 0x40, 0) && expanderUpdate(0x03, 0, 0x40);
 }
 
-static void pollPhysicalButton(PhysicalButton &key, uint32_t now) {
+static void pollPhysicalButton(PhysicalButton &key, uint32_t now, bool powerKey) {
   const bool pressed = digitalRead(key.pin) == LOW;
   const uint32_t touchMs = lastTouchMs.load();
   const bool touchRecent = touchMs && (uint32_t)(now - touchMs) < 500;
@@ -617,7 +624,7 @@ static void pollPhysicalButton(PhysicalButton &key, uint32_t now) {
   }
   if (pressed == key.stablePressed) {
     if (pressed && touchRecent) key.touchedDuringPress = true;
-    if (pressed && key.armed && now - key.pressedMs >= kPowerHoldMs)
+    if (powerKey && pressed && key.armed && now - key.pressedMs >= kPowerHoldMs)
       powerOffRequested = true;
     return;
   }
@@ -633,7 +640,7 @@ static void pollPhysicalButton(PhysicalButton &key, uint32_t now) {
     key.armed = true; // Ignore a key held during boot.
     return;
   }
-  if (!powerOffRequested && now - key.pressedMs < kPowerHoldMs &&
+  if (!powerKey && !powerOffRequested && now - key.pressedMs < kSettingsClickMaxMs &&
       !key.touchedDuringPress && !touchRecent)
     settingsTogglePending = true;
   key.touchedDuringPress = false;
@@ -2442,6 +2449,54 @@ static void networkTask(void *) {
   }
 }
 
+static uint8_t aht30Crc(const uint8_t *data) {
+  uint8_t crc = 0xFF;
+  for (int i = 0; i < 6; ++i) {
+    crc ^= data[i];
+    for (int bit = 0; bit < 8; ++bit)
+      crc = crc & 0x80 ? (uint8_t)((crc << 1) ^ 0x31) : (uint8_t)(crc << 1);
+  }
+  return crc;
+}
+
+static void pollIndoorAht30(uint32_t now) {
+  if (!aht30_dev_handle) return;
+  if (!aht30Pending) {
+    if ((int32_t)(now - aht30NextAt) < 0) return;
+    aht30NextAt = now + 10000;
+    const uint8_t command[] = {0xAC, 0x33, 0x00};
+    if (i2c_master_transmit(aht30_dev_handle, command, sizeof(command), 30) == ESP_OK) {
+      aht30StartedAt = now;
+      aht30Pending = true;
+      return;
+    }
+  } else {
+    if ((uint32_t)(now - aht30StartedAt) < 85) return;
+    uint8_t data[7];
+    if (i2c_master_receive(aht30_dev_handle, data, sizeof(data), 30) == ESP_OK) {
+      if ((data[0] & 0x80) && (uint32_t)(now - aht30StartedAt) < 250) return;
+      if (!(data[0] & 0x80) && (data[0] & 0x08) && aht30Crc(data) == data[6]) {
+        const uint32_t rh = ((uint32_t)data[1] << 12) | ((uint32_t)data[2] << 4) |
+                            (data[3] >> 4);
+        const uint32_t temp = ((uint32_t)(data[3] & 0x0F) << 16) |
+                              ((uint32_t)data[4] << 8) | data[5];
+        indoorHumidity = rh * (100.0f / 1048576.0f);
+        indoorTemperature = temp * (200.0f / 1048576.0f) - 50.0f;
+        if (indoorHumidity >= 0 && indoorHumidity <= 100 &&
+            indoorTemperature >= -40 && indoorTemperature <= 85) {
+          if (!indoorValid) Serial.println("[AHT30] indoor sensor ready");
+          indoorValid = true;
+          aht30Pending = false;
+          return;
+        }
+      }
+    }
+    aht30Pending = false;
+  }
+  if (indoorValid) Serial.println("[AHT30] indoor sensor unavailable");
+  indoorValid = false;
+}
+
 static void refreshUi() {
   if (!lvgl_port_lock(100)) return;
   tm t; char clockText[12] = "--:--", dateText[40] = "---- / -- / --";
@@ -2498,8 +2553,12 @@ void setup() {
   gpio_deep_sleep_hold_dis();
   gpio_hold_dis(GPIO_NUM_8);
   pinMode(kPowerButtonPin, INPUT_PULLUP);
+  pinMode(kSettingsButtonPin, INPUT_PULLUP);
   powerButton.rawPressed = powerButton.stablePressed = digitalRead(kPowerButtonPin) == LOW;
   powerButton.armed = !powerButton.stablePressed;
+  settingsButton.rawPressed = settingsButton.stablePressed =
+      digitalRead(kSettingsButtonPin) == LOW;
+  settingsButton.armed = !settingsButton.stablePressed;
   Serial.printf("[BOOT] wake=%d power_pin=%d\n", (int)wakeCause, digitalRead(kPowerButtonPin));
   setenv("TZ", kTz, 1); tzset();
   loadConfig();
@@ -2556,7 +2615,8 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
-  pollPhysicalButton(powerButton, now);
+  pollPhysicalButton(powerButton, now, true);
+  pollPhysicalButton(settingsButton, now, false);
   if (powerOffRequested) {
     setUpduty(255);
     if (digitalRead(kPowerButtonPin) == LOW) powerReleasedMs = 0;
@@ -2570,6 +2630,7 @@ void loop() {
   audioTick();
   collectWifiScan();
   maintainWifi(now);
+  pollIndoorAht30(now);
   if (ntpSynced.exchange(false)) {
     tm t; if (getLocalTime(&t, 100)) rtcWrite(t);
     networkRefresh = true;

@@ -8,6 +8,7 @@ extern i2c_master_dev_handle_t rtc_dev_handle;
 extern i2c_master_dev_handle_t imu_dev_handle;
 extern i2c_master_dev_handle_t codec_dev_handle;
 extern i2c_master_dev_handle_t expander_dev_handle;
+extern i2c_master_dev_handle_t aht30_dev_handle;
 
 #ifdef __cplusplus
 extern "C" {
