@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 .arduino15/
 release_assets/
+tools/.fonttools/

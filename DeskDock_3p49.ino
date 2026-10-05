@@ -46,6 +46,7 @@ static constexpr uint32_t kPowerHoldMs = 5000;
 static constexpr uint32_t kPowerReleaseMs = 250;
 static constexpr uint32_t kWeatherPeriodMs = 30UL * 60UL * 1000UL;
 static constexpr uint32_t kStockPeriodMs = 60UL * 60UL * 1000UL;
+static constexpr uint32_t kIntradayPeriodMs = 10UL * 60UL * 1000UL;
 static constexpr char kTz[] = "CST-8";
 static constexpr int kMaxWifiProfiles = 5;
 static constexpr int kMaxWifiEntries = 14;
@@ -145,17 +146,20 @@ static TaskHandle_t radioTaskHandle = nullptr;
 static TaskHandle_t networkTaskHandle = nullptr;
 static constexpr uint32_t kFetchWeather = 1;
 static constexpr uint32_t kFetchMarkets = 2;
+static constexpr uint32_t kFetchIntraday = 4;
 static String stockCodes[kMaxStocks];
 static String stockValues[kMaxStocks];
 static String stockStamps[kMaxStocks];
 static String stockNames[kMaxStocks];
 struct StockDetail { String high, low, volume; };
+struct IntradayQuote;
 static StockDetail stockDetails[kMaxStocks];
 static uint8_t stockCount = 1;
 static uint8_t stockPage = 0;
 static std::atomic<bool> networkRefresh{true};
-static uint32_t lastWeatherAttempt = 0, lastStockAttempt = 0;
+static uint32_t lastWeatherAttempt = 0, lastStockAttempt = 0, lastIntradayAttempt = 0;
 static uint32_t lastInputMs = 0, lastBatteryMs = 0;
+static bool intradayWindow();
 static std::atomic<uint32_t> lastTouchMs{0};
 static int batteryMv = 0, batteryPct = 0;
 static bool screenDimmed = false;
@@ -1697,7 +1701,9 @@ static void refreshWeatherNow(lv_event_t *) {
 
 static void refreshMarketsNow(lv_event_t *) {
   lastStockAttempt = millis();
-  if (networkTaskHandle) xTaskNotify(networkTaskHandle, kFetchMarkets, eSetBits);
+  lastIntradayAttempt = millis();
+  if (networkTaskHandle) xTaskNotify(networkTaskHandle,
+      kFetchMarkets | (intradayWindow() ? kFetchIntraday : 0), eSetBits);
   lastInputMs = millis();
 }
 
@@ -1786,7 +1792,7 @@ static void buildSettings() {
   adjustButton(generalCards[2], "+", 110, 27, changeVolume, 1, 85, 29);
 
   label(generalCards[3], "日期與時間", 10, 5, 174);
-  button(generalCards[3], "設定時間", 9, 27, 92, 29, editDateTime);
+  button(generalCards[3], "設定時間", 9, 27, 80, 29, editDateTime);
   hourModeButton = button(generalCards[3], cfg.hour12 ? "12 小時" : "24 小時",
                           105, 27, 80, 29, changeHourMode);
 
@@ -1802,15 +1808,15 @@ static void buildSettings() {
   lv_obj_set_style_text_align(otaStatusLabel, LV_TEXT_ALIGN_RIGHT, 0);
   otaButton = button(generalCards[5], "檢查更新", 9, 27, 186, 29, otaButtonClicked);
 
-  networkLabel = label(network, "未連線", 18, 5, 590);
-  button(network, "搜尋", 18, 31, 110, 30, scanWifi);
-  button(network, "優先", 138, 31, 110, 30, wifiPriorityUp);
-  button(network, "刪除", 258, 31, 110, 30, wifiForget);
-  button(network, "手動", 378, 31, 110, 30, editSsid);
-  button(network, "連線", 498, 31, 110, 30, connectWifi);
+  networkLabel = label(network, "未連線", 20, 5, 590);
+  button(network, "搜尋", 20, 31, 110, 30, scanWifi);
+  button(network, "優先", 142, 31, 110, 30, wifiPriorityUp);
+  button(network, "刪除", 264, 31, 110, 30, wifiForget);
+  button(network, "手動", 386, 31, 110, 30, editSsid);
+  button(network, "連線", 508, 31, 110, 30, connectWifi);
   wifiList = lv_obj_create(network);
-  lv_obj_set_pos(wifiList, 12, 66);
-  lv_obj_set_size(wifiList, 616, 62);
+  lv_obj_set_pos(wifiList, 20, 66);
+  lv_obj_set_size(wifiList, 600, 62);
   lv_obj_set_style_pad_all(wifiList, 0, 0);
   lv_obj_set_style_border_width(wifiList, 0, 0);
   lv_obj_set_style_bg_opa(wifiList, LV_OPA_TRANSP, 0);
@@ -1841,8 +1847,9 @@ static void buildSettings() {
   }
   button(weather, "更新", 575, 4, 52, 34, refreshWeatherNow);
   static const char *slotNames[kWeatherSlots] = {"地點 1", "地點 2", "地點 3"};
+  const int settingsColumnX[3] = {20, 226, 432};
   for (int slot = 0; slot < kWeatherSlots; ++slot) {
-    const int x = 20 + slot * 206;
+    const int x = settingsColumnX[slot];
     label(weather, slotNames[slot], x, 43, 92);
     lv_obj_t *county = lv_dropdown_create(weather);
     lv_obj_set_pos(county, x, 65); lv_obj_set_size(county, 186, 36);
@@ -1858,11 +1865,11 @@ static void buildSettings() {
 
   label(stocks, "已選代號", 20, 9, 95);
   stockCodesLabel = label(stocks, cfg.stockCode.c_str(), 125, 9, 490);
-  button(stocks, "編輯代號", 20, 42, 180, 42, editStock);
-  button(stocks, "自選股清單", 220, 42, 180, 42, openStocks);
-  button(stocks, "更新行情", 420, 42, 180, 42, refreshMarketsNow);
+  button(stocks, "編輯代號", settingsColumnX[0], 42, 186, 42, editStock);
+  button(stocks, "自選股清單", settingsColumnX[1], 42, 186, 42, openStocks);
+  button(stocks, "更新行情", settingsColumnX[2], 42, 188, 42, refreshMarketsNow);
   lv_obj_t *stockCard = lv_obj_create(stocks);
-  lv_obj_set_pos(stockCard, 18, 92); lv_obj_set_size(stockCard, 604, 32);
+  lv_obj_set_pos(stockCard, 20, 92); lv_obj_set_size(stockCard, 600, 32);
   lv_obj_set_style_pad_all(stockCard, 0, 0);
   lv_obj_set_style_radius(stockCard, 6, 0);
   lv_obj_set_style_bg_color(stockCard, lv_color_hex(0x141C19), 0);
@@ -2189,6 +2196,72 @@ static bool fetchStockOne(const String &code, String &stockValue, String &stockS
   return false;
 }
 
+static bool intradayWindow() {
+  tm local;
+  if (!getLocalTime(&local, 50) || local.tm_year < 124 ||
+      local.tm_wday == 0 || local.tm_wday == 6) return false;
+  const int minute = local.tm_hour * 60 + local.tm_min;
+  // The last poll after 13:30 captures the closing trade.
+  return minute >= 9 * 60 && minute < 13 * 60 + 40;
+}
+
+struct IntradayQuote {
+  bool valid = false;
+  String value, stamp, name;
+  StockDetail detail;
+};
+
+static bool fetchIntraday(const String *codes, uint8_t count, IntradayQuote *quotes) {
+  tm local;
+  if (!getLocalTime(&local, 100) || local.tm_year < 124) return false;
+  char today[9];
+  strftime(today, sizeof(today), "%Y%m%d", &local);
+  String url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=";
+  for (uint8_t i = 0; i < count; ++i) {
+    if (i) url += "%7C";
+    url += "tse_" + codes[i] + ".tw";
+  }
+  url += "&json=1&delay=0";
+  String body;
+  if (!getJson(url, 30000, &body)) return false;
+  cJSON *root = cJSON_Parse(body.c_str());
+  if (!root) return false;
+  const cJSON *rows = cJSON_GetObjectItemCaseSensitive(root, "msgArray");
+  uint8_t validCount = 0;
+  for (int rowIndex = 0; rowIndex < cJSON_GetArraySize(rows); ++rowIndex) {
+    const cJSON *row = cJSON_GetArrayItem(rows, rowIndex);
+    const char *code = jsonString(row, "c");
+    const char *date = jsonString(row, "d");
+    const char *tradeTime = jsonString(row, "t");
+    const char *priceText = jsonString(row, "z");
+    const char *previousText = jsonString(row, "y");
+    if (strcmp(date, today) || strlen(tradeTime) < 5 ||
+        !priceText[0] || priceText[0] == '-' || !previousText[0]) continue;
+    const float price = strtof(priceText, nullptr);
+    const float previous = strtof(previousText, nullptr);
+    if (price <= 0 || previous <= 0) continue;
+    for (uint8_t i = 0; i < count; ++i) {
+      if (codes[i] != code) continue;
+      IntradayQuote &quote = quotes[i];
+      quote.value = codes[i] + "  " + String(price, 2) + "  " +
+                    signedChange(String(price - previous, 2).c_str());
+      quote.stamp = String(date + 4).substring(0, 2) + "/" + String(date + 6) +
+                    " " + String(tradeTime).substring(0, 5);
+      quote.name = jsonString(row, "n");
+      quote.detail.high = jsonString(row, "h");
+      quote.detail.low = jsonString(row, "l");
+      const char *volume = jsonString(row, "v");
+      if (volume[0] && volume[0] != '-') quote.detail.volume = String(volume) + " 張";
+      quote.valid = true;
+      ++validCount;
+      break;
+    }
+  }
+  cJSON_Delete(root);
+  Serial.printf("[STOCK] intraday %u/%u quotes at %s\n", validCount, count, today);
+  return validCount > 0;
+}
+
 static bool fetchIndex(RemoteData &remote) {
   tm month;
   if (!getLocalTime(&month, 100) || month.tm_year < 124) {
@@ -2336,6 +2409,28 @@ static void networkTask(void *) {
                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                   (unsigned)uxTaskGetStackHighWaterMark(nullptr));
 
+    if (requests & kFetchIntraday) {
+      String codes[kMaxStocks];
+      uint8_t count;
+      while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
+      count = stockCount;
+      for (uint8_t i = 0; i < count; ++i) codes[i] = stockCodes[i];
+      lvgl_port_unlock();
+      IntradayQuote quotes[kMaxStocks];
+      if (count && fetchIntraday(codes, count, quotes)) {
+        while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
+        for (uint8_t i = 0; i < count; ++i) {
+          if (!quotes[i].valid || i >= stockCount || stockCodes[i] != codes[i]) continue;
+          stockValues[i] = quotes[i].value;
+          stockStamps[i] = quotes[i].stamp;
+          if (!quotes[i].name.isEmpty()) stockNames[i] = quotes[i].name;
+          stockDetails[i] = quotes[i].detail;
+          if (i == 0) { remote.stock = quotes[i].value; remote.stockStamp = quotes[i].stamp; }
+        }
+        lvgl_port_unlock();
+      }
+    }
+
     if (requests & kFetchWeather) {
       for (int slot = 0; slot < kWeatherSlots && WiFi.status() == WL_CONNECTED; ++slot) {
         while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
@@ -2375,7 +2470,8 @@ static void networkTask(void *) {
       count = stockCount;
       for (uint8_t i = 0; i < count; ++i) codes[i] = stockCodes[i];
       lvgl_port_unlock();
-      for (uint8_t i = 0; i < count && WiFi.status() == WL_CONNECTED; ++i) {
+      for (uint8_t i = 0; i < count && !intradayWindow() &&
+           WiFi.status() == WL_CONNECTED; ++i) {
         String value, stamp, name;
         StockDetail detail;
         const bool valid = fetchStockOne(codes[i], value, stamp, name, detail);
@@ -2649,6 +2745,11 @@ void loop() {
     if (refresh || (uint32_t)(now - lastStockAttempt) >= kStockPeriodMs) {
       lastStockAttempt = now;
       requests |= kFetchMarkets;
+    }
+    if (intradayWindow() && (refresh || !lastIntradayAttempt ||
+        (uint32_t)(now - lastIntradayAttempt) >= kIntradayPeriodMs)) {
+      lastIntradayAttempt = now;
+      requests |= kFetchIntraday;
     }
     if (requests && networkTaskHandle) xTaskNotify(networkTaskHandle, requests, eSetBits);
   }

@@ -62,7 +62,8 @@ static void setFooterPage(lv_obj_t *page, uint8_t index) {
   const StockDetail &detail = stockDetails[index];
   homeSetText(lv_obj_get_child(page, 3), "最高 " + (detail.high.isEmpty() ? String("--") : detail.high));
   homeSetText(lv_obj_get_child(page, 4), "最低 " + (detail.low.isEmpty() ? String("--") : detail.low));
-  homeSetText(lv_obj_get_child(page, 5), "成交量 " + (detail.volume.isEmpty() ? String("--") : detail.volume + " 股"));
+  homeSetText(lv_obj_get_child(page, 5), "成交量 " + (detail.volume.isEmpty() ? String("--") :
+      detail.volume + (detail.volume.endsWith("張") ? "" : " 股")));
   const int dotStep = 9;
   const int dotStart = (kHomeContentW - (stockCount * dotStep - 4)) / 2;
   for (uint8_t i = 0; i < kMaxStocks; ++i) {
