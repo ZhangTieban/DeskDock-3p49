@@ -193,7 +193,7 @@ static void showHomeCarousel(uint8_t page) {
   for (uint8_t i = 0; i < 3; ++i) {
     const bool active = i == homeCarouselPage;
     lv_obj_t *bar = lv_obj_get_child(homeCarouselTabs[i], 0);
-    lv_obj_set_pos(bar, active ? 6 : 8, active ? 15 : 19);
+    lv_obj_set_pos(bar, active ? 15 : 17, active ? 15 : 19);
     lv_obj_set_size(bar, active ? 8 : 4, active ? 26 : 18);
     lv_obj_set_style_bg_color(bar,
         lv_color_hex(active ? 0x83D7BB : 0x536E5D), 0);
@@ -472,8 +472,8 @@ static void buildHome() {
   lv_obj_add_event_cb(next, stepRadio, LV_EVENT_CLICKED, (void *)(intptr_t)1);
 
   homeCarouselSwitch = lv_obj_create(homeScreen);
-  lv_obj_set_pos(homeCarouselSwitch, kHomeRightX + 291, 0);
-  lv_obj_set_size(homeCarouselSwitch, 22, 172);
+  lv_obj_set_pos(homeCarouselSwitch, kHomeRightX + kHomeContentW, 0);
+  lv_obj_set_size(homeCarouselSwitch, kWidth - (kHomeRightX + kHomeContentW), 172);
   lv_obj_set_style_pad_all(homeCarouselSwitch, 0, 0);
   lv_obj_set_style_radius(homeCarouselSwitch, 0, 0);
   lv_obj_set_style_bg_opa(homeCarouselSwitch, LV_OPA_TRANSP, 0);
@@ -486,7 +486,7 @@ static void buildHome() {
     lv_obj_t *tab = lv_button_create(homeCarouselSwitch);
     homeCarouselTabs[i] = tab;
     lv_obj_set_pos(tab, 1, 1 + i * 57);
-    lv_obj_set_size(tab, 20, 56);
+    lv_obj_set_size(tab, kWidth - (kHomeRightX + kHomeContentW) - 2, 56);
     lv_obj_set_style_pad_all(tab, 0, 0);
     lv_obj_set_style_border_width(tab, 0, 0);
     lv_obj_set_style_radius(tab, 4, 0);
@@ -498,7 +498,7 @@ static void buildHome() {
     lv_obj_add_event_cb(tab, selectHomeCarousel, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
     lv_obj_add_event_cb(tab, swipeHomeCarousel, LV_EVENT_GESTURE, nullptr);
     lv_obj_t *bar = lv_obj_create(tab);
-    lv_obj_set_pos(bar, 8, 8);
+    lv_obj_set_pos(bar, 17, 8);
     lv_obj_set_size(bar, 4, 18);
     lv_obj_set_style_pad_all(bar, 0, 0);
     lv_obj_set_style_border_width(bar, 0, 0);

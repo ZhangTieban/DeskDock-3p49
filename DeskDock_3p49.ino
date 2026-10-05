@@ -183,7 +183,7 @@ extern "C" void desk_touch_activity(void) {
   lastTouchMs.store(now);
 }
 extern "C" void desk_touch_report(int x, int y) {
-  Serial.printf("[TOUCH] raw=%d,%d ui=%d,%d\n", x, y, kWidth - 1 - x, kHeight - 1 - y);
+  Serial.printf("[TOUCH] raw=%d,%d ui=%d,%d\n", x, y, y, kWidth - 1 - x);
 }
 static lv_obj_t *homeScreen, *settingsScreen, *editorScreen, *stockScreen;
 static lv_obj_t *stockReturnScreen;

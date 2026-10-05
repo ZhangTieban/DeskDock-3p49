@@ -274,6 +274,9 @@ void lvgl_port_init(void)
   lv_indev_set_type(touch_indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_display(touch_indev, disp);
   lv_indev_set_read_cb(touch_indev, TouchInputReadCallback);
+  lv_timer_set_period(lv_indev_get_read_timer(touch_indev), 10);
+  lv_indev_set_gesture_min_distance(touch_indev, 25);
+  lv_indev_set_gesture_min_velocity(touch_indev, 2);
 
   ESP_LOGI(TAG, "Install LVGL tick timer");
   esp_timer_create_args_t lvgl_tick_timer_args = {};
