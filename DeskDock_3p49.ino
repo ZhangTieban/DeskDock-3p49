@@ -156,6 +156,7 @@ struct IntradayQuote;
 static StockDetail stockDetails[kMaxStocks];
 static uint8_t stockCount = 1;
 static uint8_t stockPage = 0;
+static uint32_t stockUiRevision = 0;
 static std::atomic<bool> networkRefresh{true};
 static uint32_t lastWeatherAttempt = 0, lastStockAttempt = 0, lastIntradayAttempt = 0;
 static uint32_t lastInputMs = 0, lastBatteryMs = 0;
@@ -295,6 +296,7 @@ static bool parseStockCodes(const String &input) {
   if (!count || input.endsWith(",")) return false;
   stockCount = count;
   for (uint8_t i = 0; i < kMaxStocks; ++i) stockCodes[i] = i < count ? parsed[i] : "";
+  ++stockUiRevision;
   return true;
 }
 
@@ -1088,6 +1090,14 @@ static void updateStockScreen() {
   if (!stockScreen) return;
   const uint8_t pages = (stockCount + 2) / 3;
   if (stockPage >= pages) stockPage = pages - 1;
+  static lv_obj_t *renderedScreen = nullptr;
+  static uint8_t renderedPage = 0xff;
+  static uint32_t renderedRevision = UINT32_MAX;
+  if (renderedScreen == stockScreen && renderedPage == stockPage &&
+      renderedRevision == stockUiRevision) return;
+  renderedScreen = stockScreen;
+  renderedPage = stockPage;
+  renderedRevision = stockUiRevision;
   lv_label_set_text_fmt(stockPageLabel, "%u / %u", stockPage + 1, pages);
   for (uint8_t card = 0; card < 3; ++card) {
     const uint8_t slot = stockPage * 3 + card;
@@ -1165,6 +1175,10 @@ static void updateRadioScreen() {
   if (!radioStatusLabel) return;
   const int state = radioState.load();
   const int station = radioStation.load();
+  static int renderedState = -1, renderedStation = -1;
+  if (state == renderedState && station == renderedStation) return;
+  renderedState = state;
+  renderedStation = station;
   const char *status = state == 1 ? "連線中" : state == 2 ? "播放中" :
                        state == 3 ? "連線失敗" : "已停止";
   lv_label_set_text(radioStatusLabel, status);
@@ -1924,6 +1938,7 @@ static void saveField(const String &value) {
           stockDetails[i] = StockDetail{};
         }
       }
+      ++stockUiRevision;
       if (stockCodesLabel) lv_label_set_text(stockCodesLabel, cfg.stockCode.c_str());
       if (footerPage >= stockCount) footerPage = 0;
       updateStockScreen();
@@ -2426,6 +2441,7 @@ static void networkTask(void *) {
           if (!quotes[i].name.isEmpty()) stockNames[i] = quotes[i].name;
           stockDetails[i] = quotes[i].detail;
           if (i == 0) { remote.stock = quotes[i].value; remote.stockStamp = quotes[i].stamp; }
+          ++stockUiRevision;
         }
         lvgl_port_unlock();
       }
@@ -2485,6 +2501,7 @@ static void networkTask(void *) {
             stockDetails[i] = detail;
             if (i == 0) { remote.stock = value; remote.stockStamp = stamp; }
           }
+          ++stockUiRevision;
         }
         lvgl_port_unlock();
         if (current && valid) {
@@ -2611,8 +2628,14 @@ static void refreshUi() {
   snprintf(status, sizeof(status), batteryPresent() ? "Wi-Fi · %d%%" : "Wi-Fi",
            batteryPct);
   homeSetText(wifiLabel, status);
-  lv_obj_set_style_text_color(wifiLabel, lv_color_hex(WiFi.status() == WL_CONNECTED ?
-      0xDCE9E1 : 0x66716C), 0);
+  static bool wifiColorReady = false, wifiColorConnected = false;
+  const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  if (!wifiColorReady || wifiConnected != wifiColorConnected) {
+    lv_obj_set_style_text_color(wifiLabel,
+                                lv_color_hex(wifiConnected ? 0xDCE9E1 : 0x66716C), 0);
+    wifiColorReady = true;
+    wifiColorConnected = wifiConnected;
+  }
   const uint32_t now = millis();
   refreshHomeRows(now);
   if (networkLabel) {
@@ -2621,7 +2644,7 @@ static void refreshUi() {
       wifiScanPending ? "搜尋中..." : WiFi.status() == WL_CONNECTED ?
       "已連線 " + WiFi.SSID() : wifiCandidateActive ? "連線中 " + wifiCandidateSsid :
       wifiAttempt >= 0 ? "連線中 " + wifiProfiles[wifiAttempt].ssid : "未連線";
-    lv_label_set_text(networkLabel, status.c_str());
+    homeSetText(networkLabel, status);
   }
   for (int slot = 0; slot < kWeatherSlots; ++slot) {
     if (!weatherPreviewLabels[slot]) continue;

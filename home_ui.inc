@@ -40,6 +40,14 @@ static String stockDisplayName(uint8_t index) {
 static void setFooterPage(lv_obj_t *page, uint8_t index) {
   if (!stockCount) return;
   index %= stockCount;
+  struct RenderedPage { lv_obj_t *page; uint8_t index; uint32_t revision; };
+  static RenderedPage rendered[2] = {};
+  for (const RenderedPage &item : rendered)
+    if (item.page == page && item.index == index &&
+        item.revision == stockUiRevision) return;
+  RenderedPage &slot = rendered[0].page == page || !rendered[0].page ?
+      rendered[0] : rendered[1];
+  slot = {page, index, stockUiRevision};
   String price, change, stamp;
   splitStockLine(stockValues[index], 3, price, change, stamp);
   if (price.startsWith(stockCodes[index] + "  "))
@@ -237,6 +245,7 @@ static void updateHomeWeatherIcon() {
 static void updateHomeRadio() {
   const int station = radioStation.load();
   const int state = radioState.load();
+  static int renderedState = -1;
   const String stationName = station ? String(kRadioNames[station - 1]) : String("選擇電台");
   if (strcmp(lv_label_get_text(homeRadioStation), stationName.c_str())) {
     lv_point_t textSize;
@@ -246,16 +255,19 @@ static void updateHomeRadio() {
         textSize.x > 125 ? &desk_font_16_bold : &desk_font_20, 0);
   }
   homeSetText(homeRadioStation, stationName);
-  lv_obj_set_style_text_color(homeRadioStation,
-      lv_color_hex(state == 3 ? 0xF27873 : 0xF3F5F2), 0);
+  if (state != renderedState)
+    lv_obj_set_style_text_color(homeRadioStation,
+        lv_color_hex(state == 3 ? 0xF27873 : 0xF3F5F2), 0);
   const bool playing = state == 1 || state == 2;
   homeSetText(homeRadioStatus, state == 1 ? String("連線中") :
       state == 2 ? String("播放中") : state == 3 ? String("連線失敗") : String("已暫停"));
-  lv_obj_set_style_text_color(homeRadioStatus,
-      lv_color_hex(state == 3 ? 0xF27873 : playing ? 0x83D7BB : 0xAABBB1), 0);
+  if (state != renderedState)
+    lv_obj_set_style_text_color(homeRadioStatus,
+        lv_color_hex(state == 3 ? 0xF27873 : playing ? 0x83D7BB : 0xAABBB1), 0);
   homeSetText(lv_obj_get_child(homeRadioToggle, 0),
               playing ? String(LV_SYMBOL_PAUSE) : String(LV_SYMBOL_PLAY));
   homeSetText(lv_obj_get_child(homeRadioToggle, 1), playing ? String("暫停") : String("播放"));
+  renderedState = state;
 }
 
 static void refreshHomeRows(uint32_t now) {
@@ -281,8 +293,12 @@ static void refreshHomeRows(uint32_t now) {
   if (indexChange.startsWith("+")) indexChangeText = "▲" + indexChange.substring(1);
   else if (indexChange.startsWith("-")) indexChangeText = "▼" + indexChange.substring(1);
   homeSetText(homeStockChangeLabel, indexChangeText);
-  lv_obj_set_style_text_color(homeStockChangeLabel,
-                              lv_color_hex(stockChangeColor(indexChange)), 0);
+  const uint32_t changeColor = stockChangeColor(indexChange);
+  static uint32_t renderedChangeColor = UINT32_MAX;
+  if (changeColor != renderedChangeColor) {
+    lv_obj_set_style_text_color(homeStockChangeLabel, lv_color_hex(changeColor), 0);
+    renderedChangeColor = changeColor;
+  }
   updateHomeWeatherIcon();
   updateHomeRadio();
   String weatherTitle = kCounties[cfg.counties[weatherSlot]];
