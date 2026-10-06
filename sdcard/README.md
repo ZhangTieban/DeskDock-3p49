@@ -4,11 +4,12 @@
 `/fonts/NotoSansTC-Regular.ttf` 與 `/fonts/NotoSansTC-Bold.ttf`。
 插入 SD 卡後重新啟動 DeskDock。舊版的 `NotoSansTC-VF.ttf` 可刪除。
 
-開機序列埠會顯示 `[FONT] SD mounted, 14/14 font fallbacks ready`。
-所有 14 個現有字型的中文字形會優先從 SD 上對應的完整 Noto Sans TC
-Regular (400) 或 Bold (700) TTF 即時讀取並快取。原有 D-DIN、Hanken、符號
-等內建字形仍維持原樣。因此新增個股的中文名稱無須重建韌體字集，
-粗體中文也會維持相同字重。SD 卡或檔案缺失時，仍會顯示內建字形；若 SD 字型未涵蓋某個
+開機序列埠會顯示 `[FONT] SD mounted, 5/5 font fallbacks ready`。
+五種會顯示中文的文字大小先使用韌體內建的常用字形；缺字時才從 SD 上
+對應的完整 Noto Sans TC Regular (400) 或 Bold (700) TTF 讀取並快取。
+數字、圖示字型沿用原本的內建字形與文字字型備援。因此新增個股的
+中文名稱無須重建韌體字集，粗體缺字也會使用 Bold 字重。SD 卡或檔案缺失時，
+仍會顯示內建字形；若 SD 字型未涵蓋某個
 Unicode 字元，該字元仍可能缺字。開機後請勿拔出正在使用的 SD 卡。
 
 SD 卡同時供 OTA 更新使用，請保留 `/update` 資料夾與足夠空間。

@@ -2706,7 +2706,7 @@ void setup() {
                               &networkTaskHandle, 0) != pdPASS)
     Serial.println("[NETWORK] task creation failed");
   lastInputMs = millis();
-  Serial.println("[DeskDock] ready");
+  Serial.printf("[DeskDock] ready at %u ms\n", (unsigned)millis());
 }
 
 void loop() {

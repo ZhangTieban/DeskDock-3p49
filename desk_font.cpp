@@ -43,17 +43,6 @@ static bool getGlyphDsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
   return true;
 }
 
-// Keep the built-in fonts for Latin text and as an SD-free fallback. All CJK
-// glyphs use one fixed-weight SD face when it is available.
-static bool getSdPreferredGlyphDsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
-                                   uint32_t letter, uint32_t next) {
-  if ((letter >= 0x2e80 && letter <= 0x9fff) ||
-      (letter >= 0xf900 && letter <= 0xfaff) ||
-      (letter >= 0xff00 && letter <= 0xffef) ||
-      (letter >= 0x20000 && letter <= 0x2fa1f)) return false;
-  return getGlyphDsc(font, dsc, letter, next);
-}
-
 static const void *getGlyphBitmap(lv_font_glyph_dsc_t *dsc, lv_draw_buf_t *buf) {
   const uint8_t *src = static_cast<const uint8_t *>(dsc->gid.src);
   if (dsc->req_raw_bitmap || !buf) return src;
@@ -148,6 +137,7 @@ bool deskFontSdMounted() { return sdMounted; }
 
 void deskFontInitSd() {
   if (sdMounted) return;
+  const uint32_t startedAt = millis();
   if (!SD_MMC.setPins(41, 39, 40) ||
       !SD_MMC.begin("/sdcard", true, false, BOARD_MAX_SDMMC_FREQ, 20)) {
     Serial.println("[FONT] SD unavailable; using built-in glyphs");
@@ -171,37 +161,26 @@ void deskFontInitSd() {
   lv_fs_drv_register(&sdFontFs);
 
   struct FontFile { lv_font_t *font; const char *path; uint16_t size; };
+  // Only text-bearing sizes need a TTF handle. The icon and large digit fonts
+  // already fall back to these sizes and never draw Chinese at their own size.
   static const FontFile files[] = {
     {&desk_font_16, "/fonts/NotoSansTC-Regular.ttf", 16},
     {&desk_font_16_bold, "/fonts/NotoSansTC-Bold.ttf", 16},
     {&desk_font_14_bold, "/fonts/NotoSansTC-Bold.ttf", 14},
     {&desk_font_10_bold, "/fonts/NotoSansTC-Bold.ttf", 10},
-    {&desk_font_18, "/fonts/NotoSansTC-Regular.ttf", 18},
     {&desk_font_20, "/fonts/NotoSansTC-Regular.ttf", 20},
-    {&desk_font_20_bold, "/fonts/NotoSansTC-Bold.ttf", 20},
-    {&desk_font_24_weather, "/fonts/NotoSansTC-Regular.ttf", 24},
-    {&desk_font_24_moon, "/fonts/NotoSansTC-Regular.ttf", 24},
-    {&desk_font_34, "/fonts/NotoSansTC-Regular.ttf", 34},
-    {&desk_font_58, "/fonts/NotoSansTC-Regular.ttf", 58},
-    {&desk_font_70, "/fonts/NotoSansTC-Regular.ttf", 70},
-    {&desk_font_86, "/fonts/NotoSansTC-Regular.ttf", 86},
-    {&desk_font_93, "/fonts/NotoSansTC-Regular.ttf", 93},
   };
-  static lv_font_t builtInCopies[sizeof(files) / sizeof(files[0])];
   unsigned loaded = 0;
-  for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
-    const FontFile &entry = files[i];
+  for (const FontFile &entry : files) {
     if (!SD_MMC.exists(entry.path)) continue;
     String lvPath = String("S:") + entry.path;
     lv_font_t *sdFont = lv_tiny_ttf_create_file_ex(
-        lvPath.c_str(), entry.size, LV_FONT_KERNING_NORMAL, 16);
+        lvPath.c_str(), entry.size, LV_FONT_KERNING_NONE, 16);
     if (!sdFont) continue;
-    builtInCopies[i] = *entry.font;
-    sdFont->fallback = &builtInCopies[i];
+    sdFont->fallback = entry.font->fallback;
     entry.font->fallback = sdFont;
-    entry.font->get_glyph_dsc = getSdPreferredGlyphDsc;
     ++loaded;
   }
-  Serial.printf("[FONT] SD mounted, %u/%u font fallbacks ready\n", loaded,
-                (unsigned)(sizeof(files) / sizeof(files[0])));
+  Serial.printf("[FONT] SD mounted, %u/%u font fallbacks ready in %u ms\n", loaded,
+                (unsigned)(sizeof(files) / sizeof(files[0])), (unsigned)(millis() - startedAt));
 }

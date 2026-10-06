@@ -27,7 +27,7 @@ Windows 若編譯器無法處理含中文的專案路徑，可先用 `subst` 指
 
 將 [sdcard](sdcard/README.md) 中的 `fonts` 資料夾放到 FAT32 SD 卡根目錄，
 或解壓 `sdcard-fonts.zip` 到卡片根目錄，然後重新啟動。韌體內建字形
-仍可在缺卡時顯示；所有繁體中文字形會優先從 SD 上的完整
+仍可在缺卡時顯示；常用中文字形由韌體快速繪製，缺字時從 SD 上的完整
 Noto Sans TC Regular／Bold 字型讀取，新個股名稱無須重新產生韌體字集。
 從舊版升級時，請同時更新 SD 卡的字型資料夾；單獨 OTA 韌體不會寫入 SD 字型。
 
