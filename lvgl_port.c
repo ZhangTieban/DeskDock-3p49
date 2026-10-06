@@ -120,32 +120,33 @@ static void example_lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, u
 static void TouchInputReadCallback(lv_indev_t * indev, lv_indev_data_t *indevData)
 {
   static bool was_pressed = false;
+  static uint32_t last_valid_ms = 0;
+  static lv_point_t last_point;
   uint8_t read_touchpad_cmd[11] = {0xb5, 0xab, 0xa5, 0x5a, 0x0, 0x0, 0x0, 0x0e,0x0, 0x0, 0x0};
   uint8_t buff[32] = {0};
-  if (i2c_master_touch_write_read(disp_touch_dev_handle,read_touchpad_cmd,11,buff,32) != ESP_OK) {
-    indevData->state = LV_INDEV_STATE_RELEASED;
-    was_pressed = false;
-    return;
-  }
-  uint16_t pointX;
-  uint16_t pointY;
-  pointX = (((uint16_t)buff[2] & 0x0f) << 8) | (uint16_t)buff[3];
-  pointY = (((uint16_t)buff[4] & 0x0f) << 8) | (uint16_t)buff[5];
-  if (buff[1]>0 && buff[1]<5)
+  const bool read_ok = i2c_master_touch_write_read(
+      disp_touch_dev_handle,read_touchpad_cmd,11,buff,32) == ESP_OK;
+  const uint16_t pointX = (((uint16_t)buff[2] & 0x0f) << 8) | (uint16_t)buff[3];
+  const uint16_t pointY = (((uint16_t)buff[4] & 0x0f) << 8) | (uint16_t)buff[5];
+  if (read_ok && buff[1]>0 && buff[1]<5 &&
+      pointX < EXAMPLE_LCD_V_RES && pointY < EXAMPLE_LCD_H_RES)
   {
-    if (pointX >= EXAMPLE_LCD_V_RES || pointY >= EXAMPLE_LCD_H_RES) {
-      indevData->state = LV_INDEV_STATE_RELEASED;
-      was_pressed = false;
-      return;
-    }
     if (!was_pressed) desk_touch_report(pointX, pointY);
     was_pressed = true;
+    last_valid_ms = lv_tick_get();
+    last_point.x = pointY;
+    last_point.y = EXAMPLE_LCD_V_RES - 1 - pointX;
     desk_touch_activity();
     indevData->state = LV_INDEV_STATE_PRESSED;
-    indevData->point.x = pointY;
-    indevData->point.y = EXAMPLE_LCD_V_RES - 1 - pointX;
+    indevData->point = last_point;
   }
-  else 
+  else if (was_pressed && (uint32_t)(lv_tick_get() - last_valid_ms) < 30)
+  {
+    // A single missed I2C sample must not split a swipe into a release and tap.
+    indevData->state = LV_INDEV_STATE_PRESSED;
+    indevData->point = last_point;
+  }
+  else
   {
     indevData->state = LV_INDEV_STATE_RELEASED;
     was_pressed = false;

@@ -1032,8 +1032,8 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, int x, int y, int w,
   lv_obj_set_style_border_width(o, 1, 0);
   lv_obj_set_style_border_color(o, lv_color_hex(0x34433B), 0);
   lv_obj_set_style_shadow_width(o, 0, 0);
-  lv_obj_add_event_cb(o, buttonCue, LV_EVENT_CLICKED, nullptr);
-  lv_obj_add_event_cb(o, callback, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_event_cb(o, buttonCue, LV_EVENT_PRESSED, nullptr);
+  lv_obj_add_event_cb(o, callback, LV_EVENT_PRESSED, nullptr);
   lv_obj_t *l = label(o, text, 0, 0, w - 8);
   lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_center(l);
@@ -1242,7 +1242,7 @@ static void buildRadioSettings(lv_obj_t *radio) {
   for (uint8_t i = 0; i < kRadioStations; ++i) {
     radioStationButtons[i] = button(radio, kRadioButtonNames[i], 20 + (i % 3) * 112,
                                       5 + (i / 3) * 40, 104, 34, noAction);
-    lv_obj_add_event_cb(radioStationButtons[i], selectRadio, LV_EVENT_CLICKED,
+    lv_obj_add_event_cb(radioStationButtons[i], selectRadio, LV_EVENT_PRESSED,
                         (void *)(uintptr_t)i);
   }
   lv_obj_t *rule = lv_obj_create(radio);
@@ -1255,10 +1255,10 @@ static void buildRadioSettings(lv_obj_t *radio) {
   lv_obj_set_style_text_align(radioStatusLabel, LV_TEXT_ALIGN_RIGHT, 0);
   radioNowLabel = label(radio, "選擇電台", 389, 40, 231, 20);
   lv_obj_t *prev = button(radio, LV_SYMBOL_LEFT, 389, 79, 53, 40, noAction);
-  lv_obj_add_event_cb(prev, stepRadio, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
+  lv_obj_add_event_cb(prev, stepRadio, LV_EVENT_PRESSED, (void *)(intptr_t)-1);
   radioPlayButton = button(radio, LV_SYMBOL_PLAY, 452, 79, 105, 40, toggleRadio);
   lv_obj_t *next = button(radio, LV_SYMBOL_RIGHT, 567, 79, 53, 40, noAction);
-  lv_obj_add_event_cb(next, stepRadio, LV_EVENT_CLICKED, (void *)(intptr_t)1);
+  lv_obj_add_event_cb(next, stepRadio, LV_EVENT_PRESSED, (void *)(intptr_t)1);
   updateRadioScreen();
 }
 
@@ -1332,7 +1332,7 @@ static void addKey(const char *caption, const char *value, int x, int y, int w, 
   lv_obj_t *captionLabel = label(key, caption, 0, 0, w - 4);
   lv_obj_set_style_text_align(captionLabel, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_center(captionLabel);
-  lv_obj_add_event_cb(key, keyPressed, LV_EVENT_CLICKED, (void *)value);
+  lv_obj_add_event_cb(key, keyPressed, LV_EVENT_PRESSED, (void *)value);
 }
 
 static void renderKeyboard() {
@@ -1556,8 +1556,8 @@ static void rebuildWifiList() {
     label(row, ssid.c_str(), 9, 5, 470);
     lv_obj_t *statusLabel = label(row, status, 505, 5, 84);
     lv_obj_set_style_text_align(statusLabel, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_add_event_cb(row, buttonCue, LV_EVENT_CLICKED, nullptr);
-    lv_obj_add_event_cb(row, wifiEntryClicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    lv_obj_add_event_cb(row, buttonCue, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(row, wifiEntryClicked, LV_EVENT_PRESSED, (void *)(intptr_t)i);
   }
   wifiListDirty = false;
 }
@@ -1641,7 +1641,7 @@ static void eqAdjustButton(lv_obj_t *parent, const char *text, int x, int y,
                            uint8_t band, bool increase) {
   lv_obj_t *control = button(parent, text, x, y, 44, 34, noAction);
   const uintptr_t action = band * 2 + (increase ? 1 : 0);
-  lv_obj_add_event_cb(control, changeEq, LV_EVENT_CLICKED, (void *)action);
+  lv_obj_add_event_cb(control, changeEq, LV_EVENT_PRESSED, (void *)action);
 }
 static void changeCounty(lv_event_t *event) {
   const uint8_t slot = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
@@ -1684,10 +1684,13 @@ static void adjustButton(lv_obj_t *parent, const char *text, int x, int y,
                          lv_event_cb_t callback, int delta, int width = 44,
                          int height = 34) {
   lv_obj_t *control = button(parent, text, x, y, width, height, noAction);
-  lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, (void *)(intptr_t)delta);
+  lv_obj_add_event_cb(control, callback, LV_EVENT_PRESSED, (void *)(intptr_t)delta);
 }
 
 static void selectSettingsPage(uint8_t index) {
+  static uint8_t shown = 0xff;
+  if (index == shown) return;
+  shown = index;
   for (uint8_t i = 0; i < kSettingsPages; ++i) {
     if (i == index) lv_obj_remove_flag(settingsPages[i], LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(settingsPages[i], LV_OBJ_FLAG_HIDDEN);
@@ -1749,8 +1752,8 @@ static void buildSettings() {
     lv_obj_set_style_shadow_width(nav, 0, 0);
     lv_obj_set_style_border_width(nav, 0, 0);
     lv_obj_set_style_bg_color(nav, lv_color_hex(0x121916), 0);
-    lv_obj_add_event_cb(nav, buttonCue, LV_EVENT_CLICKED, nullptr);
-    lv_obj_add_event_cb(nav, settingsNavClicked, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+    lv_obj_add_event_cb(nav, buttonCue, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(nav, settingsNavClicked, LV_EVENT_PRESSED, (void *)(uintptr_t)i);
     lv_obj_t *navLabel = label(nav, names[i], 0, 0, 68);
     lv_obj_set_style_text_align(navLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(navLabel, lv_color_hex(0xB3BDB7), 0);

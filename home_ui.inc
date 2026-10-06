@@ -215,10 +215,13 @@ static void selectHomeCarousel(lv_event_t *event) {
 
 static void swipeHomeCarousel(lv_event_t *) {
   const lv_dir_t direction = lv_indev_get_gesture_dir(lv_indev_active());
-  if (direction == LV_DIR_TOP && homeCarouselPage < 2)
+  if (direction == LV_DIR_TOP && homeCarouselPage < 2) {
     showHomeCarousel(homeCarouselPage + 1);
-  else if (direction == LV_DIR_BOTTOM && homeCarouselPage > 0)
+    lv_indev_wait_release(lv_indev_active());
+  } else if (direction == LV_DIR_BOTTOM && homeCarouselPage > 0) {
     showHomeCarousel(homeCarouselPage - 1);
+    lv_indev_wait_release(lv_indev_active());
+  }
 }
 
 static void updateHomeWeatherIcon() {
@@ -474,7 +477,7 @@ static void buildHome() {
   lv_obj_set_style_border_width(radioHit, 0, 0);
   lv_obj_set_style_bg_opa(radioHit, LV_OPA_TRANSP, 0);
   lv_obj_clear_flag(radioHit, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_event_cb(radioHit, openRadio, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_event_cb(radioHit, openRadio, LV_EVENT_PRESSED, nullptr);
   lv_obj_t *accent = homeRule(radioHit, 0, 4, 3, 29);
   lv_obj_set_style_bg_color(accent, lv_color_hex(0x83D7BB), 0);
   homeRadioStation = label(radioHit, "選擇電台", 12, 3, 125);
@@ -484,13 +487,13 @@ static void buildHome() {
   lv_obj_set_style_text_align(homeRadioStatus, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_t *prev = homeControl(homeRadioPane, LV_SYMBOL_LEFT, "上一台", 12, 97,
                                50, noAction);
-  lv_obj_add_event_cb(prev, stepRadio, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
+  lv_obj_add_event_cb(prev, stepRadio, LV_EVENT_PRESSED, (void *)(intptr_t)-1);
   homeRadioToggle = homeControl(homeRadioPane, LV_SYMBOL_PLAY, "播放", 72, 97,
                                 137, toggleRadio);
   lv_obj_set_style_bg_color(homeRadioToggle, lv_color_hex(0x398C62), 0);
   lv_obj_t *next = homeControl(homeRadioPane, LV_SYMBOL_RIGHT, "下一台", 219, 97,
                                50, noAction);
-  lv_obj_add_event_cb(next, stepRadio, LV_EVENT_CLICKED, (void *)(intptr_t)1);
+  lv_obj_add_event_cb(next, stepRadio, LV_EVENT_PRESSED, (void *)(intptr_t)1);
 
   homeCarouselSwitch = lv_obj_create(homeScreen);
   lv_obj_set_pos(homeCarouselSwitch, kHomeRightX + kHomeContentW, 0);
@@ -516,7 +519,7 @@ static void buildHome() {
     lv_obj_set_style_shadow_width(tab, 0, 0);
     lv_obj_clear_flag(tab, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(tab, LV_OBJ_FLAG_GESTURE_BUBBLE);
-    lv_obj_add_event_cb(tab, selectHomeCarousel, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+    lv_obj_add_event_cb(tab, selectHomeCarousel, LV_EVENT_PRESSED, (void *)(uintptr_t)i);
     lv_obj_add_event_cb(tab, swipeHomeCarousel, LV_EVENT_GESTURE, nullptr);
     lv_obj_t *bar = lv_obj_create(tab);
     lv_obj_set_pos(bar, 17, 8);
