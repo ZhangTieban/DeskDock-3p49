@@ -199,10 +199,16 @@ extern "C" void desk_touch_report(int x, int y) {
 }
 static lv_obj_t *homeScreen, *settingsScreen, *editorScreen, *stockScreen;
 static lv_obj_t *stockReturnScreen;
-static constexpr uint8_t kSettingsPages = 6;
-static constexpr uint8_t kSettingsNavCount = kSettingsPages;
+static constexpr uint8_t kSettingsPages = 7;
+static constexpr uint8_t kSettingsNavCount = kSettingsPages - 1;
+static constexpr uint8_t kRadioSettingsPage = 5;
+static constexpr uint8_t kImageSettingsPage = 6;
 static lv_obj_t *settingsPages[kSettingsPages], *settingsNavButtons[kSettingsNavCount];
 static lv_obj_t *settingsNavIndicators[kSettingsNavCount];
+static lv_obj_t *sampleImage, *sampleImageStatus, *sampleImagePlaceholder, *sampleImageModeButton;
+static bool sampleImageFit = false;
+static constexpr const char *kSampleImageSdPath = "/images/IMG_7504.jpg";
+static constexpr const char *kSampleImageLvPath = "S:/images/IMG_7504.jpg";
 static lv_obj_t *clockLabel, *clockPeriodLabel, *dateLabel, *wifiLabel;
 static lv_obj_t *footerPageA, *footerPageB;
 static uint8_t footerPage = 0;
@@ -1233,7 +1239,7 @@ static void stepRadio(lv_event_t *event) {
   updateHomeRadio();
 }
 static void openRadio(lv_event_t *) {
-  selectSettingsPage(kSettingsPages - 1);
+  selectSettingsPage(kRadioSettingsPage);
   lv_screen_load(settingsScreen);
   updateRadioScreen();
   lastInputMs = millis();
@@ -1684,7 +1690,64 @@ static void adjustButton(lv_obj_t *parent, const char *text, int x, int y,
                          lv_event_cb_t callback, int delta, int width = 44,
                          int height = 34) {
   lv_obj_t *control = button(parent, text, x, y, width, height, noAction);
+  lv_obj_set_style_text_font(lv_obj_get_child(control, 0), &desk_font_16_bold, 0);
   lv_obj_add_event_cb(control, callback, LV_EVENT_PRESSED, (void *)(intptr_t)delta);
+}
+
+static lv_obj_t *generalLabel(lv_obj_t *parent, const char *text, int x, int y, int w) {
+  lv_obj_t *o = label(parent, text, x, y, w);
+  lv_obj_set_style_text_font(o, &desk_font_16_bold, 0);
+  return o;
+}
+
+static lv_obj_t *generalButton(lv_obj_t *parent, const char *text, int x, int y,
+                               int w, int h, lv_event_cb_t callback) {
+  lv_obj_t *o = button(parent, text, x, y, w, h, callback);
+  lv_obj_set_style_text_font(lv_obj_get_child(o, 0), &desk_font_16_bold, 0);
+  return o;
+}
+
+static void openWifiSettings(lv_event_t *) {
+  selectSettingsPage(1);
+  lastInputMs = millis();
+}
+
+static void returnGeneralSettings(lv_event_t *) {
+  selectSettingsPage(0);
+  lastInputMs = millis();
+}
+
+static void reloadSampleImage(lv_event_t *) {
+  if (!deskFontSdMounted()) deskFontInitSd();
+  const char *status = nullptr;
+  if (!deskFontSdMounted()) status = "SD 卡未掛載";
+  else if (!SD_MMC.exists(kSampleImageSdPath)) status = "找不到 IMG_7504.jpg";
+  else {
+    lv_image_header_t header;
+    if (lv_image_decoder_get_info(kSampleImageLvPath, &header) != LV_RESULT_OK)
+      status = "JPG 解碼失敗";
+    else {
+      lv_image_set_src(sampleImage, kSampleImageLvPath);
+      lv_obj_remove_flag(sampleImage, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(sampleImagePlaceholder, LV_OBJ_FLAG_HIDDEN);
+      lv_label_set_text_fmt(sampleImageStatus, "%ux%u JPG 已載入",
+                            (unsigned)header.w, (unsigned)header.h);
+    }
+  }
+  if (status) {
+    lv_obj_add_flag(sampleImage, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(sampleImagePlaceholder, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(sampleImageStatus, status);
+  }
+  lastInputMs = millis();
+}
+
+static void toggleSampleImageFit(lv_event_t *) {
+  sampleImageFit = !sampleImageFit;
+  lv_image_set_inner_align(sampleImage, sampleImageFit ? LV_IMAGE_ALIGN_CONTAIN : LV_IMAGE_ALIGN_COVER);
+  lv_label_set_text(lv_obj_get_child(sampleImageModeButton, 0),
+                    sampleImageFit ? "填滿畫面" : "顯示全圖");
+  lastInputMs = millis();
 }
 
 static void selectSettingsPage(uint8_t index) {
@@ -1694,18 +1757,23 @@ static void selectSettingsPage(uint8_t index) {
   for (uint8_t i = 0; i < kSettingsPages; ++i) {
     if (i == index) lv_obj_remove_flag(settingsPages[i], LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(settingsPages[i], LV_OBJ_FLAG_HIDDEN);
+  }
+  for (uint8_t i = 0; i < kSettingsNavCount; ++i) {
+    const bool selected = (i == 0 ? index <= 1 : i + 1 == index);
     lv_obj_set_style_bg_color(settingsNavButtons[i],
-                              lv_color_hex(i == index ? 0x253A30 : 0x121916), 0);
+                              lv_color_hex(selected ? 0x253A30 : 0x121916), 0);
     lv_obj_set_style_text_color(lv_obj_get_child(settingsNavButtons[i], 0),
-                                lv_color_hex(i == index ? 0xF3F5F2 : 0xB3BDB7), 0);
-    if (i == index) lv_obj_remove_flag(settingsNavIndicators[i], LV_OBJ_FLAG_HIDDEN);
+                                lv_color_hex(selected ? 0xF3F5F2 : 0xB3BDB7), 0);
+    if (selected) lv_obj_remove_flag(settingsNavIndicators[i], LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(settingsNavIndicators[i], LV_OBJ_FLAG_HIDDEN);
   }
 }
 
 static void settingsNavClicked(lv_event_t *event) {
-  const uint8_t index = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+  const uint8_t navIndex = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+  const uint8_t index = navIndex == 0 ? 0 : navIndex + 1;
   selectSettingsPage(index);
+  if (index == kImageSettingsPage) reloadSampleImage(nullptr);
   lastInputMs = millis();
   Serial.printf("[UI] settings page=%u\n", index);
 }
@@ -1732,17 +1800,17 @@ static void buildSettings() {
   lv_obj_set_style_text_font(settingsScreen, &desk_font_16, 0);
   lv_obj_clear_flag(settingsScreen, LV_OBJ_FLAG_SCROLLABLE);
   label(settingsScreen, "設定", 18, 12, 60);
-  const char *names[] = {"一般", "Wi-Fi", "天氣", "股票", "音效", "網路電台"};
+  const char *names[] = {"一般", "天氣", "股票", "音效", "網路電台", "圖片"};
+  for (uint8_t i = 0; i < kSettingsPages; ++i) {
+    settingsPages[i] = lv_obj_create(settingsScreen);
+    lv_obj_set_pos(settingsPages[i], 0, 44);
+    lv_obj_set_size(settingsPages[i], 640, 128);
+    lv_obj_set_style_pad_all(settingsPages[i], 0, 0);
+    lv_obj_set_style_border_width(settingsPages[i], 0, 0);
+    lv_obj_set_style_bg_color(settingsPages[i], lv_color_hex(0x080B0B), 0);
+    lv_obj_clear_flag(settingsPages[i], LV_OBJ_FLAG_SCROLLABLE);
+  }
   for (uint8_t i = 0; i < kSettingsNavCount; ++i) {
-    if (i < kSettingsPages) {
-      settingsPages[i] = lv_obj_create(settingsScreen);
-      lv_obj_set_pos(settingsPages[i], 0, 44);
-      lv_obj_set_size(settingsPages[i], 640, 128);
-      lv_obj_set_style_pad_all(settingsPages[i], 0, 0);
-      lv_obj_set_style_border_width(settingsPages[i], 0, 0);
-      lv_obj_set_style_bg_color(settingsPages[i], lv_color_hex(0x080B0B), 0);
-      lv_obj_clear_flag(settingsPages[i], LV_OBJ_FLAG_SCROLLABLE);
-    }
     lv_obj_t *nav = lv_button_create(settingsScreen);
     settingsNavButtons[i] = nav;
     lv_obj_set_pos(nav, 82 + i * 80, 5);
@@ -1758,15 +1826,13 @@ static void buildSettings() {
     lv_obj_set_style_text_align(navLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(navLabel, lv_color_hex(0xB3BDB7), 0);
     lv_obj_center(navLabel);
-    if (i < kSettingsPages) {
-      lv_obj_t *indicator = lv_obj_create(nav);
-      settingsNavIndicators[i] = indicator;
-      lv_obj_set_pos(indicator, 0, 31); lv_obj_set_size(indicator, 76, 3);
-      lv_obj_set_style_pad_all(indicator, 0, 0);
-      lv_obj_set_style_border_width(indicator, 0, 0);
-      lv_obj_set_style_bg_color(indicator, lv_color_hex(0x83D7BB), 0);
-      lv_obj_clear_flag(indicator, LV_OBJ_FLAG_SCROLLABLE);
-    }
+    lv_obj_t *indicator = lv_obj_create(nav);
+    settingsNavIndicators[i] = indicator;
+    lv_obj_set_pos(indicator, 0, 31); lv_obj_set_size(indicator, 76, 3);
+    lv_obj_set_style_pad_all(indicator, 0, 0);
+    lv_obj_set_style_border_width(indicator, 0, 0);
+    lv_obj_set_style_bg_color(indicator, lv_color_hex(0x83D7BB), 0);
+    lv_obj_clear_flag(indicator, LV_OBJ_FLAG_SCROLLABLE);
   }
   lv_obj_t *general = settingsPages[0];
   lv_obj_t *network = settingsPages[1];
@@ -1774,12 +1840,13 @@ static void buildSettings() {
   lv_obj_t *stocks = settingsPages[3];
   lv_obj_t *audio = settingsPages[4];
   lv_obj_t *radio = settingsPages[5];
+  lv_obj_t *imagePage = settingsPages[kImageSettingsPage];
   lv_obj_t *generalCards[6];
   for (int i = 0; i < 6; ++i) {
     lv_obj_t *card = lv_obj_create(general);
     generalCards[i] = card;
-    lv_obj_set_pos(card, 12 + (i % 3) * 206, (i / 3) * 64);
-    lv_obj_set_size(card, i % 3 == 2 ? 204 : 194, 61);
+    lv_obj_set_pos(card, 12 + (i % 3) * 208, 2 + (i / 3) * 66);
+    lv_obj_set_size(card, 200, 58);
     lv_obj_set_style_pad_all(card, 0, 0);
     lv_obj_set_style_radius(card, 7, 0);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x121916), 0);
@@ -1787,45 +1854,47 @@ static void buildSettings() {
     lv_obj_set_style_border_color(card, lv_color_hex(0x28372F), 0);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   }
-  label(generalCards[0], "亮度", 10, 5, 65);
-  brightnessValueLabel = label(generalCards[0], "", 92, 5, 90);
+  generalLabel(generalCards[0], "亮度", 10, 5, 70);
+  brightnessValueLabel = generalLabel(generalCards[0], "", 100, 5, 90);
   lv_obj_set_style_text_align(brightnessValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(brightnessValueLabel, "%d%%", cfg.brightness);
-  adjustButton(generalCards[0], "-", 9, 27, changeBrightness, -5, 80, 29);
-  adjustButton(generalCards[0], "+", 105, 27, changeBrightness, 5, 80, 29);
+  adjustButton(generalCards[0], "-", 9, 26, changeBrightness, -5, 86, 27);
+  adjustButton(generalCards[0], "+", 105, 26, changeBrightness, 5, 86, 27);
 
-  label(generalCards[1], "省電", 10, 5, 65);
-  sleepValueLabel = label(generalCards[1], "", 92, 5, 90);
+  generalLabel(generalCards[1], "省電", 10, 5, 70);
+  sleepValueLabel = generalLabel(generalCards[1], "", 100, 5, 90);
   lv_obj_set_style_text_align(sleepValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(sleepValueLabel, "%d 分", cfg.sleepMinutes);
-  adjustButton(generalCards[1], "-", 9, 27, changeSleep, -5, 80, 29);
-  adjustButton(generalCards[1], "+", 105, 27, changeSleep, 5, 80, 29);
+  adjustButton(generalCards[1], "-", 9, 26, changeSleep, -5, 86, 27);
+  adjustButton(generalCards[1], "+", 105, 26, changeSleep, 5, 86, 27);
 
-  label(generalCards[2], "音量", 10, 5, 65);
-  volumeValueLabel = label(generalCards[2], "", 102, 5, 90);
+  generalLabel(generalCards[2], "音量", 10, 5, 70);
+  volumeValueLabel = generalLabel(generalCards[2], "", 100, 5, 90);
   lv_obj_set_style_text_align(volumeValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(volumeValueLabel, "%d%%", cfg.volume);
-  adjustButton(generalCards[2], "-", 9, 27, changeVolume, -1, 85, 29);
-  adjustButton(generalCards[2], "+", 110, 27, changeVolume, 1, 85, 29);
+  adjustButton(generalCards[2], "-", 9, 26, changeVolume, -1, 86, 27);
+  adjustButton(generalCards[2], "+", 105, 26, changeVolume, 1, 86, 27);
 
-  label(generalCards[3], "日期與時間", 10, 5, 174);
-  button(generalCards[3], "設定時間", 9, 27, 80, 29, editDateTime);
-  hourModeButton = button(generalCards[3], cfg.hour12 ? "12 小時" : "24 小時",
-                          105, 27, 80, 29, changeHourMode);
+  generalLabel(generalCards[3], "日期與時間", 10, 5, 180);
+  generalButton(generalCards[3], "設定時間", 9, 26, 86, 27, editDateTime);
+  hourModeButton = generalButton(generalCards[3], cfg.hour12 ? "12 小時" : "24 小時",
+                                 105, 26, 86, 27, changeHourMode);
 
-  label(generalCards[4], "內容輪播", 10, 5, 90);
-  carouselValueLabel = label(generalCards[4], "", 102, 5, 80);
+  generalLabel(generalCards[4], "內容輪播", 10, 5, 90);
+  carouselValueLabel = generalLabel(generalCards[4], "", 100, 5, 90);
   lv_obj_set_style_text_align(carouselValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(carouselValueLabel, "%d 秒", cfg.carouselSeconds);
-  adjustButton(generalCards[4], "-", 9, 27, changeHomeCarouselInterval, -5, 80, 29);
-  adjustButton(generalCards[4], "+", 105, 27, changeHomeCarouselInterval, 5, 80, 29);
+  adjustButton(generalCards[4], "-", 9, 26, changeHomeCarouselInterval, -5, 86, 27);
+  adjustButton(generalCards[4], "+", 105, 26, changeHomeCarouselInterval, 5, 86, 27);
 
-  label(generalCards[5], "韌體更新", 10, 5, 82);
-  otaStatusLabel = label(generalCards[5], DESKDOCK_VERSION, 92, 5, 100);
+  generalLabel(generalCards[5], "系統與網路", 10, 5, 90);
+  otaStatusLabel = generalLabel(generalCards[5], DESKDOCK_VERSION, 100, 5, 90);
   lv_obj_set_style_text_align(otaStatusLabel, LV_TEXT_ALIGN_RIGHT, 0);
-  otaButton = button(generalCards[5], "檢查更新", 9, 27, 186, 29, otaButtonClicked);
+  generalButton(generalCards[5], "Wi-Fi", 9, 26, 86, 27, openWifiSettings);
+  otaButton = generalButton(generalCards[5], "檢查更新", 105, 26, 86, 27, otaButtonClicked);
 
-  networkLabel = label(network, "未連線", 20, 5, 590);
+  button(network, "返回一般", 20, 2, 110, 26, returnGeneralSettings);
+  networkLabel = label(network, "未連線", 142, 5, 476);
   button(network, "搜尋", 20, 31, 110, 30, scanWifi);
   button(network, "優先", 142, 31, 110, 30, wifiPriorityUp);
   button(network, "刪除", 264, 31, 110, 30, wifiForget);
@@ -1910,6 +1979,28 @@ static void buildSettings() {
   button(audio, "恢復平坦", 470, 48, 143, 42, resetEq);
 
   buildRadioSettings(radio);
+
+  lv_obj_t *imageFrame = lv_obj_create(imagePage);
+  lv_obj_set_pos(imageFrame, 12, 6);
+  lv_obj_set_size(imageFrame, 310, 116);
+  lv_obj_set_style_pad_all(imageFrame, 0, 0);
+  lv_obj_set_style_radius(imageFrame, 6, 0);
+  lv_obj_set_style_bg_color(imageFrame, lv_color_hex(0x141C19), 0);
+  lv_obj_set_style_border_width(imageFrame, 1, 0);
+  lv_obj_set_style_border_color(imageFrame, lv_color_hex(0x34433B), 0);
+  lv_obj_clear_flag(imageFrame, LV_OBJ_FLAG_SCROLLABLE);
+  sampleImage = lv_image_create(imageFrame);
+  lv_obj_set_size(sampleImage, 308, 114);
+  lv_obj_set_pos(sampleImage, 0, 0);
+  lv_image_set_inner_align(sampleImage, LV_IMAGE_ALIGN_COVER);
+  lv_obj_add_flag(sampleImage, LV_OBJ_FLAG_HIDDEN);
+  sampleImagePlaceholder = label(imageFrame, "SD 圖片待載入", 14, 47, 280);
+  lv_obj_set_style_text_align(sampleImagePlaceholder, LV_TEXT_ALIGN_CENTER, 0);
+  label(imagePage, "SD 圖片測試", 340, 8, 280);
+  sampleImageStatus = label(imagePage, "尚未讀取", 340, 35, 280);
+  label(imagePage, "/images/IMG_7504.jpg", 340, 59, 280);
+  sampleImageModeButton = button(imagePage, "顯示全圖", 340, 87, 132, 32, toggleSampleImageFit);
+  button(imagePage, "重新讀取", 486, 87, 132, 32, reloadSampleImage);
 
   selectSettingsPage(0);
   button(settingsScreen, LV_SYMBOL_LEFT, 575, 5, 54, 34, goHome);
