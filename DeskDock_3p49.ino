@@ -12,6 +12,7 @@
 #include <ESP_I2S.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioFileSourceBuffer.h>
+#include <AudioFileSourceFS.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioGeneratorAAC.h>
 #include <AudioOutputI2S.h>
@@ -138,9 +139,20 @@ static bool audioReady = false;
 static int appliedVolume = -1;
 static SemaphoreHandle_t audioMutex;
 static SemaphoreHandle_t networkHttpMutex;
-static std::atomic<int> radioCommand{-1}; // -1 none, -2 failed, 0 stop, 1..9 station
+static constexpr int kMp3PlayCommand = 100;
+static constexpr int kMp3PauseCommand = -3;
+static constexpr int kMp3ResumeCommand = -4;
+static constexpr int kMp3MaxTracks = 32;
+static std::atomic<int> radioCommand{-1}; // -1 none, -2 failed, 0 stop, 1..9 station, 100 SD MP3
 static std::atomic<int> radioState{0}; // 0 stopped, 1 connecting, 2 playing, 3 failed
 static std::atomic<int> radioStation{0};
+static std::atomic<int> mp3State{0}; // 0 stopped, 1 opening, 2 playing, 3 paused, 4 failed, 5 ended
+static std::atomic<int> mp3Progress{0}; // 0..1000, based on file bytes
+static SemaphoreHandle_t mp3RequestMutex;
+static char mp3RequestedPath[192] = {};
+static String mp3Tracks[kMp3MaxTracks];
+static int mp3TrackCount = 0, mp3SelectedTrack = 0;
+static const char *mp3StorageStatus = "尚未掃描";
 static std::atomic<int> eqGain[3];
 static TaskHandle_t radioTaskHandle = nullptr;
 static TaskHandle_t networkTaskHandle = nullptr;
@@ -202,13 +214,11 @@ static lv_obj_t *stockReturnScreen;
 static constexpr uint8_t kSettingsPages = 7;
 static constexpr uint8_t kSettingsNavCount = kSettingsPages - 1;
 static constexpr uint8_t kRadioSettingsPage = 5;
-static constexpr uint8_t kImageSettingsPage = 6;
+static constexpr uint8_t kMp3SettingsPage = 6;
 static lv_obj_t *settingsPages[kSettingsPages], *settingsNavButtons[kSettingsNavCount];
 static lv_obj_t *settingsNavIndicators[kSettingsNavCount];
-static lv_obj_t *sampleImage, *sampleImageStatus, *sampleImagePlaceholder, *sampleImageModeButton;
-static bool sampleImageFit = false;
-static constexpr const char *kSampleImageSdPath = "/images/IMG_7504.jpg";
-static constexpr const char *kSampleImageLvPath = "S:/images/IMG_7504.jpg";
+static lv_obj_t *mp3TitleLabel, *mp3StatusLabel, *mp3CountLabel;
+static lv_obj_t *mp3PlayButton, *mp3ProgressBar;
 static lv_obj_t *clockLabel, *clockPeriodLabel, *dateLabel, *wifiLabel;
 static lv_obj_t *footerPageA, *footerPageB;
 static uint8_t footerPage = 0;
@@ -727,7 +737,8 @@ static void initAudio() {
 static void audioTick() {
   if (!audioReady) return;
   const int playing = radioState.load();
-  if (playing == 1 || playing == 2) {
+  const int local = mp3State.load();
+  if (playing == 1 || playing == 2 || local == 1 || local == 2 || local == 3) {
     beepPending.store(false);
     return;
   }
@@ -836,8 +847,34 @@ static void radioAudioTask(void *) {
   uint8_t retryCount = 0;
   wifi_ps_type_t previousWifiSleep = WIFI_PS_MIN_MODEM;
   bool wifiSleepChanged = false;
+  auto closeStream = [&]() {
+    if (decoder) {
+      if (decoder->isRunning()) decoder->stop();
+      delete decoder;
+      decoder = nullptr;
+    }
+    if (buffer) { delete buffer; buffer = nullptr; }
+    if (encodedBuffer) { heap_caps_free(encodedBuffer); encodedBuffer = nullptr; }
+    if (source) { delete source; source = nullptr; hls = nullptr; }
+    if (output) { output->stop(); delete output; output = nullptr; }
+  };
+  auto restoreI2s = [&]() {
+    if (!driverSwitched) return;
+    xSemaphoreTake(audioMutex, portMAX_DELAY);
+    audioI2s.setPins(15, 46, 45, 6, 7);
+    audioReady = audioI2s.begin(I2S_MODE_STD, 24000, I2S_DATA_BIT_WIDTH_16BIT,
+                                I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH);
+    if (audioReady) (void)setCodecRate(24000);
+    xSemaphoreGive(audioMutex);
+    driverSwitched = false;
+  };
   for (;;) {
     int command = radioCommand.exchange(-1);
+    if (command == kMp3PauseCommand || command == kMp3ResumeCommand) {
+      if (command == kMp3PauseCommand && mp3State.load() == 2) mp3State.store(3);
+      if (command == kMp3ResumeCommand && mp3State.load() == 3) mp3State.store(2);
+      command = -1;
+    }
     bool automaticRetry = false;
     if (command == -1 && retryStation && WiFi.status() == WL_CONNECTED &&
         (int32_t)(millis() - retryAtMs) >= 0) {
@@ -847,45 +884,66 @@ static void radioAudioTask(void *) {
       Serial.printf("[RADIO] retry station=%d attempt=%u\n", command, retryCount);
     }
     if (command != -1) {
-      if (command == 0 || (command > 0 && !automaticRetry)) {
+      const bool mp3Requested = command == kMp3PlayCommand;
+      const bool wasMp3 = mp3State.load() != 0;
+      if (command == 0 || mp3Requested || (command > 0 && !automaticRetry)) {
         retryStation = 0;
         retryCount = 0;
       }
-      radioState.store(command > 0 ? 1 : command == -2 ? 3 : 0);
-      if (decoder) {
-        if (decoder->isRunning()) decoder->stop();
-        delete decoder;
-        decoder = nullptr;
-      }
-      if (buffer) { delete buffer; buffer = nullptr; }
-      if (encodedBuffer) { heap_caps_free(encodedBuffer); encodedBuffer = nullptr; }
-      if (source) { delete source; source = nullptr; hls = nullptr; }
-      if (output) { output->stop(); delete output; output = nullptr; }
+      radioState.store(mp3Requested ? 0 : command > 0 ? 1 : command == -2 ? 3 : 0);
+      mp3State.store(mp3Requested ? 1 : 0);
+      closeStream();
       const bool canStartRadio = audioReady || driverSwitched;
-      if (driverSwitched && command <= 0) {
-        xSemaphoreTake(audioMutex, portMAX_DELAY);
-        audioI2s.setPins(15, 46, 45, 6, 7);
-        audioReady = audioI2s.begin(I2S_MODE_STD, 24000, I2S_DATA_BIT_WIDTH_16BIT,
-                                     I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH);
-        if (audioReady) (void)setCodecRate(24000);
-        xSemaphoreGive(audioMutex);
-        driverSwitched = false;
-      }
-      if (command > 0 && !wifiSleepChanged) {
+      if (command <= 0) restoreI2s();
+      if (command > 0 && !mp3Requested && !wifiSleepChanged) {
         previousWifiSleep = WiFi.getSleep();
         wifiSleepChanged = WiFi.setSleep(false);
-      } else if (command <= 0 && wifiSleepChanged) {
+      } else if ((command <= 0 || mp3Requested) && wifiSleepChanged) {
         WiFi.setSleep(previousWifiSleep);
         wifiSleepChanged = false;
       }
       if (command <= 0) {
-        Serial.println(command == 0 ? "[RADIO] stopped" : "[RADIO] stopped after error");
+        Serial.println(command == 0 && wasMp3 ? "[MP3] stopped" :
+                       command == 0 ? "[RADIO] stopped" : "[RADIO] stopped after error");
         if (command == -2 && retryCount < 3 && radioStation.load() > 0) {
           static constexpr uint32_t kRetryDelaysMs[] = {3000, 10000, 30000};
           retryStation = radioStation.load();
           retryAtMs = millis() + kRetryDelaysMs[retryCount++];
           Serial.printf("[RADIO] reconnect in %lu seconds\n",
                         (unsigned long)(kRetryDelaysMs[retryCount - 1] / 1000));
+        }
+      } else if (mp3Requested) {
+        char path[sizeof(mp3RequestedPath)] = {};
+        if (mp3RequestMutex && xSemaphoreTake(mp3RequestMutex, portMAX_DELAY) == pdTRUE) {
+          strlcpy(path, mp3RequestedPath, sizeof(path));
+          xSemaphoreGive(mp3RequestMutex);
+        }
+        if (canStartRadio && deskFontSdMounted() && path[0]) {
+          if (!driverSwitched) {
+            xSemaphoreTake(audioMutex, portMAX_DELAY);
+            audioReady = false;
+            audioI2s.end();
+            driverSwitched = true;
+            xSemaphoreGive(audioMutex);
+          }
+          source = new AudioFileSourceFS(SD_MMC, path);
+          if (source && source->isOpen()) {
+            output = new RadioI2SOutput();
+            decoder = new AudioGeneratorMP3();
+            if (output && decoder && output->SetBuffers(8, 2304) &&
+                output->SetPinout(15, 46, 45, 7) &&
+                decoder->begin(source, output) && output->codecConfigured()) {
+              mp3Progress.store(0);
+              mp3State.store(2);
+              Serial.printf("[MP3] playing %s\n", path);
+            }
+          }
+        }
+        if (mp3State.load() != 2) {
+          closeStream();
+          restoreI2s();
+          mp3State.store(4);
+          Serial.printf("[MP3] open/decode failed %s\n", path);
         }
       } else if (WiFi.status() != WL_CONNECTED || !canStartRadio) {
         radioState.store(3);
@@ -1006,6 +1064,20 @@ static void radioAudioTask(void *) {
         int expected = -1;
         radioCommand.compare_exchange_strong(expected, -2);
         radioState.store(3);
+      }
+    }
+    if (mp3State.load() == 2 && decoder && source) {
+      const uint32_t size = source->getSize();
+      if (size) mp3Progress.store((int)std::min((uint64_t)1000,
+                                                   (uint64_t)source->getPos() * 1000 / size));
+      if (appliedVolume != cfg.volume) {
+        if (writeCodecVolume(cfg.volume)) appliedVolume = cfg.volume;
+      }
+      if (!decoder->isRunning() || !decoder->loop()) {
+        Serial.println("[MP3] playback ended");
+        closeStream();
+        restoreI2s();
+        mp3State.store(5);
       }
     }
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -1717,38 +1789,113 @@ static void returnGeneralSettings(lv_event_t *) {
   lastInputMs = millis();
 }
 
-static void reloadSampleImage(lv_event_t *) {
+static void updateMp3Screen() {
+  if (!mp3TitleLabel) return;
+  const int state = mp3State.load();
+  if (mp3TrackCount) {
+    const String &path = mp3Tracks[mp3SelectedTrack];
+    const int slash = path.lastIndexOf('/');
+    homeSetText(mp3TitleLabel, path.c_str() + slash + 1);
+    lv_label_set_text_fmt(mp3CountLabel, "%d / %d 首", mp3SelectedTrack + 1, mp3TrackCount);
+  } else {
+    homeSetText(mp3TitleLabel, mp3StorageStatus);
+    homeSetText(mp3CountLabel, "0 首");
+  }
+  const char *status = state == 1 ? "開啟中" : state == 2 ? "播放中" :
+                       state == 3 ? "已暫停" : state == 4 ? "開啟或解碼失敗" :
+                       state == 5 ? "播放已結束" :
+                       mp3TrackCount ? "已停止" : mp3StorageStatus;
+  homeSetText(mp3StatusLabel, status);
+  homeSetText(lv_obj_get_child(mp3PlayButton, 0),
+              state == 2 ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+  lv_bar_set_value(mp3ProgressBar, mp3Progress.load(), LV_ANIM_OFF);
+}
+
+static void scanMp3(lv_event_t *) {
+  const int state = mp3State.load();
+  if (state == 1 || state == 2 || state == 3) {
+    homeSetText(mp3StatusLabel, "請先停止播放再掃描");
+    return;
+  }
+  mp3TrackCount = 0;
+  mp3SelectedTrack = 0;
+  mp3Progress.store(0);
+  mp3State.store(0);
   if (!deskFontSdMounted()) deskFontInitSd();
-  const char *status = nullptr;
-  if (!deskFontSdMounted()) status = "SD 卡未掛載";
-  else if (!SD_MMC.exists(kSampleImageSdPath)) status = "找不到 IMG_7504.jpg";
+  if (!deskFontSdMounted()) mp3StorageStatus = "SD 卡未掛載";
   else {
-    lv_image_header_t header;
-    if (lv_image_decoder_get_info(kSampleImageLvPath, &header) != LV_RESULT_OK)
-      status = "JPG 解碼失敗";
+    File folder = SD_MMC.open("/music");
+    if (!folder || !folder.isDirectory()) mp3StorageStatus = "缺少 /music 資料夾";
     else {
-      lv_image_set_src(sampleImage, kSampleImageLvPath);
-      lv_obj_remove_flag(sampleImage, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_add_flag(sampleImagePlaceholder, LV_OBJ_FLAG_HIDDEN);
-      lv_label_set_text_fmt(sampleImageStatus, "%ux%u JPG 已載入",
-                            (unsigned)header.w, (unsigned)header.h);
+      for (int seen = 0; seen < 256 && mp3TrackCount < kMp3MaxTracks; ++seen) {
+        File entry = folder.openNextFile();
+        if (!entry) break;
+        if (!entry.isDirectory()) {
+          String path = entry.path();
+          String lower = path;
+          lower.toLowerCase();
+          if (lower.endsWith(".mp3") && path.length() < sizeof(mp3RequestedPath))
+            mp3Tracks[mp3TrackCount++] = path;
+        }
+        entry.close();
+      }
+      folder.close();
+      for (int i = 1; i < mp3TrackCount; ++i) {
+        String item = mp3Tracks[i];
+        int j = i;
+        while (j > 0 && mp3Tracks[j - 1].compareTo(item) > 0) {
+          mp3Tracks[j] = mp3Tracks[j - 1];
+          --j;
+        }
+        mp3Tracks[j] = item;
+      }
+      mp3StorageStatus = mp3TrackCount ? "已找到 MP3" : "找不到 MP3";
     }
   }
-  if (status) {
-    lv_obj_add_flag(sampleImage, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(sampleImagePlaceholder, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(sampleImageStatus, status);
-  }
+  updateMp3Screen();
+  lastInputMs = millis();
+  Serial.printf("[MP3] scan tracks=%d status=%s\n", mp3TrackCount, mp3StorageStatus);
+}
+
+static void playSelectedMp3() {
+  if (!mp3TrackCount || !mp3RequestMutex) return;
+  if (xSemaphoreTake(mp3RequestMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+  strlcpy(mp3RequestedPath, mp3Tracks[mp3SelectedTrack].c_str(), sizeof(mp3RequestedPath));
+  xSemaphoreGive(mp3RequestMutex);
+  mp3Progress.store(0);
+  mp3State.store(1);
+  radioState.store(0);
+  radioCommand.store(kMp3PlayCommand);
+  updateRadioScreen();
+  updateHomeRadio();
+  updateMp3Screen();
+}
+
+static void toggleMp3(lv_event_t *) {
+  const int state = mp3State.load();
+  if (state == 2) radioCommand.store(kMp3PauseCommand);
+  else if (state == 3) radioCommand.store(kMp3ResumeCommand);
+  else playSelectedMp3();
   lastInputMs = millis();
 }
 
-static void toggleSampleImageFit(lv_event_t *) {
-  sampleImageFit = !sampleImageFit;
-  lv_image_set_inner_align(sampleImage, sampleImageFit ? LV_IMAGE_ALIGN_CONTAIN : LV_IMAGE_ALIGN_COVER);
-  lv_label_set_text(lv_obj_get_child(sampleImageModeButton, 0),
-                    sampleImageFit ? "填滿畫面" : "顯示全圖");
+static void stopMp3(lv_event_t *) {
+  const int state = mp3State.load();
+  if (state == 1 || state == 2 || state == 3) radioCommand.store(0);
   lastInputMs = millis();
 }
+
+static void stepMp3(int delta) {
+  if (!mp3TrackCount) return;
+  mp3SelectedTrack = (mp3SelectedTrack + delta + mp3TrackCount) % mp3TrackCount;
+  const int state = mp3State.load();
+  if (state == 1 || state == 2 || state == 3) playSelectedMp3();
+  else updateMp3Screen();
+  lastInputMs = millis();
+}
+
+static void previousMp3(lv_event_t *) { stepMp3(-1); }
+static void nextMp3(lv_event_t *) { stepMp3(1); }
 
 static void selectSettingsPage(uint8_t index) {
   static uint8_t shown = 0xff;
@@ -1773,7 +1920,7 @@ static void settingsNavClicked(lv_event_t *event) {
   const uint8_t navIndex = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
   const uint8_t index = navIndex == 0 ? 0 : navIndex + 1;
   selectSettingsPage(index);
-  if (index == kImageSettingsPage) reloadSampleImage(nullptr);
+  if (index == kMp3SettingsPage) scanMp3(nullptr);
   lastInputMs = millis();
   Serial.printf("[UI] settings page=%u\n", index);
 }
@@ -1800,7 +1947,7 @@ static void buildSettings() {
   lv_obj_set_style_text_font(settingsScreen, &desk_font_16, 0);
   lv_obj_clear_flag(settingsScreen, LV_OBJ_FLAG_SCROLLABLE);
   label(settingsScreen, "設定", 18, 12, 60);
-  const char *names[] = {"一般", "天氣", "股票", "音效", "網路電台", "圖片"};
+  const char *names[] = {"一般", "天氣", "股票", "音效", "網路電台", "MP3"};
   for (uint8_t i = 0; i < kSettingsPages; ++i) {
     settingsPages[i] = lv_obj_create(settingsScreen);
     lv_obj_set_pos(settingsPages[i], 0, 44);
@@ -1840,7 +1987,7 @@ static void buildSettings() {
   lv_obj_t *stocks = settingsPages[3];
   lv_obj_t *audio = settingsPages[4];
   lv_obj_t *radio = settingsPages[5];
-  lv_obj_t *imagePage = settingsPages[kImageSettingsPage];
+  lv_obj_t *mp3Page = settingsPages[kMp3SettingsPage];
   lv_obj_t *generalCards[6];
   for (int i = 0; i < 6; ++i) {
     lv_obj_t *card = lv_obj_create(general);
@@ -1980,27 +2127,21 @@ static void buildSettings() {
 
   buildRadioSettings(radio);
 
-  lv_obj_t *imageFrame = lv_obj_create(imagePage);
-  lv_obj_set_pos(imageFrame, 12, 6);
-  lv_obj_set_size(imageFrame, 310, 116);
-  lv_obj_set_style_pad_all(imageFrame, 0, 0);
-  lv_obj_set_style_radius(imageFrame, 6, 0);
-  lv_obj_set_style_bg_color(imageFrame, lv_color_hex(0x141C19), 0);
-  lv_obj_set_style_border_width(imageFrame, 1, 0);
-  lv_obj_set_style_border_color(imageFrame, lv_color_hex(0x34433B), 0);
-  lv_obj_clear_flag(imageFrame, LV_OBJ_FLAG_SCROLLABLE);
-  sampleImage = lv_image_create(imageFrame);
-  lv_obj_set_size(sampleImage, 308, 114);
-  lv_obj_set_pos(sampleImage, 0, 0);
-  lv_image_set_inner_align(sampleImage, LV_IMAGE_ALIGN_COVER);
-  lv_obj_add_flag(sampleImage, LV_OBJ_FLAG_HIDDEN);
-  sampleImagePlaceholder = label(imageFrame, "SD 圖片待載入", 14, 47, 280);
-  lv_obj_set_style_text_align(sampleImagePlaceholder, LV_TEXT_ALIGN_CENTER, 0);
-  label(imagePage, "SD 圖片測試", 340, 8, 280);
-  sampleImageStatus = label(imagePage, "尚未讀取", 340, 35, 280);
-  label(imagePage, "/images/IMG_7504.jpg", 340, 59, 280);
-  sampleImageModeButton = button(imagePage, "顯示全圖", 340, 87, 132, 32, toggleSampleImageFit);
-  button(imagePage, "重新讀取", 486, 87, 132, 32, reloadSampleImage);
+  label(mp3Page, "SD 音樂  /music", 20, 9, 360);
+  mp3TitleLabel = label(mp3Page, "尚未掃描", 20, 36, 365);
+  lv_obj_set_style_text_font(mp3TitleLabel, &desk_font_16_bold, 0);
+  mp3StatusLabel = label(mp3Page, "尚未掃描", 20, 65, 365);
+  mp3CountLabel = label(mp3Page, "0 首", 20, 92, 116);
+  mp3ProgressBar = lv_bar_create(mp3Page);
+  lv_obj_set_pos(mp3ProgressBar, 143, 100);
+  lv_obj_set_size(mp3ProgressBar, 237, 8);
+  lv_bar_set_range(mp3ProgressBar, 0, 1000);
+  lv_bar_set_value(mp3ProgressBar, 0, LV_ANIM_OFF);
+  button(mp3Page, LV_SYMBOL_LEFT, 400, 15, 55, 42, previousMp3);
+  mp3PlayButton = button(mp3Page, LV_SYMBOL_PLAY, 463, 15, 80, 42, toggleMp3);
+  button(mp3Page, LV_SYMBOL_RIGHT, 551, 15, 55, 42, nextMp3);
+  button(mp3Page, "停止", 400, 73, 90, 35, stopMp3);
+  button(mp3Page, "重新掃描", 499, 73, 107, 35, scanMp3);
 
   selectSettingsPage(0);
   button(settingsScreen, LV_SYMBOL_LEFT, 575, 5, 54, 34, goHome);
@@ -2079,7 +2220,8 @@ static String urlEncode(const String &value) {
 struct HttpBuffer { String body; size_t limit; bool overflow = false; };
 static bool radioNeedsNetwork() {
   const int state = radioState.load();
-  return state == 1 || state == 2 || radioCommand.load() > 0;
+  const int command = radioCommand.load();
+  return state == 1 || state == 2 || (command > 0 && command <= kRadioStations);
 }
 
 static void takeBackgroundHttpMutex() {
@@ -2753,7 +2895,10 @@ static void refreshUi() {
     lv_label_set_text(stockPreviewLabel, remote.index.c_str());
   if (wifiListDirty) rebuildWifiList();
   if (lv_screen_active() == stockScreen) updateStockScreen();
-  if (lv_screen_active() == settingsScreen) updateRadioScreen();
+  if (lv_screen_active() == settingsScreen) {
+    updateRadioScreen();
+    updateMp3Screen();
+  }
   refreshOtaUi();
   lvgl_port_unlock();
 }
@@ -2777,6 +2922,7 @@ void setup() {
   loadConfig();
   configMutex = xSemaphoreCreateMutex();
   audioMutex = xSemaphoreCreateMutex();
+  mp3RequestMutex = xSemaphoreCreateMutex();
   networkHttpMutex = xSemaphoreCreateMutex();
   i2c_master_Init();
   Serial.printf("[POWER] latch initialization %s\n", initPowerLatch() ? "ok" : "failed");

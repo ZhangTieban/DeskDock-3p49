@@ -150,12 +150,12 @@ static bool otaReadManifest() {
   return valid;
 }
 
-static bool otaStopRadio() {
+static bool otaStopAudio() {
   if (!radioTaskHandle) return true;
   radioCommand.store(0);
   const uint32_t start = millis();
   while ((uint32_t)(millis() - start) < 25000) {
-    if (radioCommand.load() == -1 && radioState.load() == 0) {
+    if (radioCommand.load() == -1 && radioState.load() == 0 && mp3State.load() == 0) {
       vTaskDelay(pdMS_TO_TICKS(300));
       return true;
     }
@@ -320,8 +320,8 @@ static void otaWorker(void *parameter) {
   bool successful = false;
   if (WiFi.status() != WL_CONNECTED)
     otaSetError(OtaError::Wifi, "Wi-Fi disconnected");
-  else if (!otaStopRadio())
-    otaSetError(OtaError::Radio, "radio could not stop");
+  else if (!otaStopAudio())
+    otaSetError(OtaError::Radio, "audio could not stop");
   else if (!install) {
     otaStage.store(OtaStage::Checking);
     if (!otaReadManifest())
