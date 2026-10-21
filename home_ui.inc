@@ -163,18 +163,29 @@ static void setWeatherPage(lv_obj_t *page) {
   }
 }
 
-static void moveHomePage(void *obj, int32_t y) { lv_obj_set_y((lv_obj_t *)obj, y); }
+static void moveFooterPages(void *obj, int32_t y) {
+  // One timeline keeps the outgoing and incoming cards on the same frame.
+  lv_obj_set_y((lv_obj_t *)obj, y);
+  lv_obj_set_y(footerPageB, y + kHomeStockH);
+}
 
-static void animateHomePages(lv_obj_t *first, lv_obj_t *second, int height) {
+static void finishFooterAnimation(lv_anim_t *) {
+  lv_obj_t *old = footerPageA;
+  footerPageA = footerPageB;
+  footerPageB = old;
+  lv_obj_set_y(footerPageA, 0);
+  lv_obj_set_y(footerPageB, kHomeStockH);
+  footerAnimating = false;
+}
+
+static void animateFooterPages() {
   lv_anim_t anim;
   lv_anim_init(&anim);
-  lv_anim_set_exec_cb(&anim, moveHomePage);
+  lv_anim_set_exec_cb(&anim, moveFooterPages);
+  lv_anim_set_completed_cb(&anim, finishFooterAnimation);
   lv_anim_set_duration(&anim, 300);
-  lv_anim_set_var(&anim, first);
-  lv_anim_set_values(&anim, 0, -height);
-  lv_anim_start(&anim);
-  lv_anim_set_var(&anim, second);
-  lv_anim_set_values(&anim, height, 0);
+  lv_anim_set_var(&anim, footerPageA);
+  lv_anim_set_values(&anim, 0, -kHomeStockH);
   lv_anim_start(&anim);
 }
 
@@ -182,9 +193,9 @@ static void advanceFooter(lv_event_t *) {
   if (footerAnimating || stockCount < 2) return;
   footerPage = (footerPage + 1) % stockCount;
   setFooterPage(footerPageB, footerPage);
-  animateHomePages(footerPageA, footerPageB, kHomeStockH);
   footerAnimating = true;
   lastFooterFlip = millis();
+  animateFooterPages();
 }
 
 static void homeVisible(lv_obj_t *item, bool visible) {
@@ -280,12 +291,6 @@ static void refreshHomeRows(uint32_t now) {
     lastWeatherFlip = now;
   }
   setWeatherPage(weatherPageA);
-  if (footerAnimating && (uint32_t)(now - lastFooterFlip) >= 350) {
-    lv_obj_t *old = footerPageA;
-    footerPageA = footerPageB; footerPageB = old;
-    lv_obj_set_y(footerPageB, kHomeStockH);
-    footerAnimating = false;
-  }
   if (!footerAnimating) setFooterPage(footerPageA, footerPage);
   if (homeCarouselPage == 1 && !footerAnimating &&
       (uint32_t)(now - lastFooterFlip) >= rotateMs) advanceFooter(nullptr);
@@ -416,15 +421,21 @@ static void buildHome() {
   lv_obj_set_style_border_width(homeWeatherPane, 0, 0);
   lv_obj_clear_flag(homeWeatherPane, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_remove_flag(homeWeatherPane, LV_OBJ_FLAG_GESTURE_BUBBLE);
-  homeWeatherTitle = label(homeWeatherPane, "臺北 · 天氣", 0, 8, 130);
+  homeWeatherTitle = label(homeWeatherPane, "臺北 · 天氣", 0, 8, 103);
   lv_obj_set_style_text_font(homeWeatherTitle, &desk_font_16_bold, 0);
-  lv_obj_t *indoorTitle = label(homeWeatherPane, "室內", 137, 8, 34);
-  lv_obj_set_style_text_font(indoorTitle, &desk_font_16_bold, 0);
-  lv_obj_set_style_text_color(indoorTitle, lv_color_hex(0xAABBB1), 0);
-  homeIndoorTemperature = label(homeWeatherPane, "--°C", 171, 8, 58);
+  homeRule(homeWeatherPane, 108, 5, 1, 22);
+  lv_obj_t *indoorTemperatureTitle = label(homeWeatherPane, "溫度", 116, 8, 34);
+  lv_obj_set_style_text_font(indoorTemperatureTitle, &desk_font_16_bold, 0);
+  lv_obj_set_style_text_color(indoorTemperatureTitle, lv_color_hex(0xAABBB1), 0);
+  homeIndoorTemperature = label(homeWeatherPane, "--°C", 151, 8, 49);
   lv_obj_set_style_text_font(homeIndoorTemperature, &desk_font_16_bold, 0);
-  homeIndoorHumidity = label(homeWeatherPane, "--%", 232, 8, 53);
+  lv_obj_set_style_text_align(homeIndoorTemperature, LV_TEXT_ALIGN_RIGHT, 0);
+  lv_obj_t *indoorHumidityTitle = label(homeWeatherPane, "濕度", 206, 8, 34);
+  lv_obj_set_style_text_font(indoorHumidityTitle, &desk_font_16_bold, 0);
+  lv_obj_set_style_text_color(indoorHumidityTitle, lv_color_hex(0xAABBB1), 0);
+  homeIndoorHumidity = label(homeWeatherPane, "--%", 241, 8, 44);
   lv_obj_set_style_text_font(homeIndoorHumidity, &desk_font_16_bold, 0);
+  lv_obj_set_style_text_align(homeIndoorHumidity, LV_TEXT_ALIGN_RIGHT, 0);
   homeRule(homeWeatherPane, 0, 33, kHomeContentW, 1);
   lv_obj_t *weatherCard = lv_obj_create(homeWeatherPane);
   lv_obj_set_pos(weatherCard, 0, 39);

@@ -131,6 +131,20 @@ static uint8_t weatherSlot = 0;
 static uint32_t lastWeatherFlip = 0;
 static SemaphoreHandle_t configMutex;
 static Preferences prefs;
+// Coalesce rapid setting presses without doing NVS writes in LVGL callbacks.
+struct PendingSetting {
+  const char *key;
+  std::atomic<int> value{0};
+  bool boolean;
+};
+static PendingSetting pendingSettings[] = {
+  {"bright_ui_v2", 0, false}, {"sleep", 0, false}, {"volume", 0, false},
+  {"home_rotate", 0, false}, {"eq_b", 0, false}, {"eq_m", 0, false},
+  {"eq_t", 0, false}, {"county", 0, false}, {"county1", 0, false},
+  {"county2", 0, false}, {"wx_main", 0, false}, {"wx_detail", 0, false},
+  {"wx_third", 0, false}, {"hour12", 0, true}
+};
+static std::atomic<uint32_t> pendingSettingsMask{0}, settingsChangedAt{0};
 static std::atomic<bool> ntpSynced{false};
 static std::atomic<bool> beepPending{false};
 static I2SClass audioI2s;
@@ -153,6 +167,7 @@ static char mp3RequestedPath[192] = {};
 static String mp3Tracks[kMp3MaxTracks];
 static int mp3TrackCount = 0, mp3SelectedTrack = 0;
 static const char *mp3StorageStatus = "尚未掃描";
+static std::atomic<bool> mp3ScanPending{false}, mp3ScanRequested{false};
 static std::atomic<int> eqGain[3];
 static TaskHandle_t radioTaskHandle = nullptr;
 static TaskHandle_t networkTaskHandle = nullptr;
@@ -201,13 +216,55 @@ static bool wifiTransientFailure = false;
 static uint32_t wifiRetryAtMs = 0, wifiRetryDelayMs = 30000;
 static int wifiStatusError = 0; // 1: authentication, 2: timeout/unavailable
 static std::atomic<int> wifiDisconnectReason{0};
+extern "C" void desk_touch_activity(void);
+extern "C" void desk_touch_report(int x, int y);
+extern "C" void desk_display_report(uint32_t rotate_us, uint32_t transfer_us);
+static portMUX_TYPE lcdStatsMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t lcdFrames = 0, lcdRotateMaxUs = 0, lcdTransferMaxUs = 0;
+static uint32_t uiHandlerMaxUs = 0;
+static std::atomic<int> pendingSettingsPageReport{-1};
+static void deferSetting(unsigned slot, int value) {
+  pendingSettings[slot].value.store(value);
+  settingsChangedAt.store(millis());
+  pendingSettingsMask.fetch_or(1UL << slot);
+}
+static void flushPendingSettings(bool force = false) {
+  if (!force && (!pendingSettingsMask.load() ||
+      (uint32_t)(millis() - settingsChangedAt.load()) < 350)) return;
+  xSemaphoreTake(configMutex, portMAX_DELAY);
+  const uint32_t mask = pendingSettingsMask.exchange(0);
+  for (unsigned i = 0; i < sizeof(pendingSettings) / sizeof(pendingSettings[0]); ++i) {
+    if (!(mask & (1UL << i))) continue;
+    auto &setting = pendingSettings[i];
+    const int value = setting.value.load();
+    const size_t written = setting.boolean ? prefs.putBool(setting.key, value != 0) :
+                                            prefs.putInt(setting.key, value);
+    if (!written) pendingSettingsMask.fetch_or(1UL << i);
+  }
+  xSemaphoreGive(configMutex);
+}
 extern "C" void desk_touch_activity(void) {
   const uint32_t now = millis();
   lastInputMs = now;
   lastTouchMs.store(now);
 }
+static std::atomic<uint32_t> pendingTouchReport{0};
+extern "C" void desk_display_report(uint32_t rotate_us, uint32_t transfer_us) {
+  portENTER_CRITICAL(&lcdStatsMux);
+  ++lcdFrames;
+  lcdRotateMaxUs = std::max(lcdRotateMaxUs, rotate_us);
+  lcdTransferMaxUs = std::max(lcdTransferMaxUs, transfer_us);
+  portEXIT_CRITICAL(&lcdStatsMux);
+}
+extern "C" void desk_ui_report(uint32_t handler_us) {
+  portENTER_CRITICAL(&lcdStatsMux);
+  uiHandlerMaxUs = std::max(uiHandlerMaxUs, handler_us);
+  portEXIT_CRITICAL(&lcdStatsMux);
+}
 extern "C" void desk_touch_report(int x, int y) {
-  Serial.printf("[TOUCH] raw=%d,%d ui=%d,%d\n", x, y, y, kWidth - 1 - x);
+  // A serial write can wait on another writer or a slow USB host. Only enqueue
+  // the latest diagnostic sample here; never delay the LVGL input callback.
+  pendingTouchReport.store((((uint32_t)x << 16) | (uint16_t)y) + 1);
 }
 static lv_obj_t *homeScreen, *settingsScreen, *editorScreen, *stockScreen;
 static lv_obj_t *stockReturnScreen;
@@ -669,6 +726,7 @@ static void pollPhysicalButton(PhysicalButton &key, uint32_t now, bool powerKey)
 }
 
 static void powerOff() {
+  flushPendingSettings(true);
   Serial.println("[POWER] releasing battery power latch");
   Serial.flush();
   setUpduty(255);
@@ -1647,9 +1705,7 @@ static void changeBrightness(lv_event_t *event) {
   if (next == cfg.brightness) return;
   cfg.brightness = next;
   if (brightnessValueLabel) lv_label_set_text_fmt(brightnessValueLabel, "%d%%", cfg.brightness);
-  xSemaphoreTake(configMutex, portMAX_DELAY);
-  prefs.putInt("bright_ui_v2", cfg.brightness);
-  xSemaphoreGive(configMutex);
+  deferSetting(0, cfg.brightness);
   applyBrightness();
   lastInputMs = millis();
 }
@@ -1660,9 +1716,7 @@ static void changeSleep(lv_event_t *event) {
   if (next == cfg.sleepMinutes) return;
   cfg.sleepMinutes = next;
   if (sleepValueLabel) lv_label_set_text_fmt(sleepValueLabel, "%d 分", cfg.sleepMinutes);
-  xSemaphoreTake(configMutex, portMAX_DELAY);
-  prefs.putInt("sleep", cfg.sleepMinutes);
-  xSemaphoreGive(configMutex);
+  deferSetting(1, cfg.sleepMinutes);
   lastInputMs = millis();
 }
 static void changeVolume(lv_event_t *event) {
@@ -1671,9 +1725,7 @@ static void changeVolume(lv_event_t *event) {
   if (next == cfg.volume) return;
   cfg.volume = next;
   if (volumeValueLabel) lv_label_set_text_fmt(volumeValueLabel, "%d%%", cfg.volume);
-  xSemaphoreTake(configMutex, portMAX_DELAY);
-  prefs.putInt("volume", cfg.volume);
-  xSemaphoreGive(configMutex);
+  deferSetting(2, cfg.volume);
   lastInputMs = millis();
 }
 static void changeHomeCarouselInterval(lv_event_t *event) {
@@ -1683,9 +1735,7 @@ static void changeHomeCarouselInterval(lv_event_t *event) {
   cfg.carouselSeconds = next;
   lv_label_set_text_fmt(carouselValueLabel, "%d 秒", next);
   lastWeatherFlip = lastFooterFlip = millis();
-  xSemaphoreTake(configMutex, portMAX_DELAY);
-  prefs.putInt("home_rotate", next);
-  xSemaphoreGive(configMutex);
+  deferSetting(3, next);
   lastInputMs = millis();
 }
 static void changeEq(lv_event_t *event) {
@@ -1697,22 +1747,16 @@ static void changeEq(lv_event_t *event) {
   cfg.eqDb[band] = next;
   eqGain[band].store(next, std::memory_order_relaxed);
   lv_label_set_text_fmt(eqValueLabels[band], "%+d dB", next);
-  static const char *keys[3] = {"eq_b", "eq_m", "eq_t"};
-  xSemaphoreTake(configMutex, portMAX_DELAY);
-  prefs.putInt(keys[band], next);
-  xSemaphoreGive(configMutex);
+  deferSetting(4 + band, next);
   lastInputMs = millis();
 }
 static void resetEq(lv_event_t *) {
-  static const char *keys[3] = {"eq_b", "eq_m", "eq_t"};
-  xSemaphoreTake(configMutex, portMAX_DELAY);
   for (int band = 0; band < 3; ++band) {
     cfg.eqDb[band] = 0;
     eqGain[band].store(0, std::memory_order_relaxed);
-    prefs.putInt(keys[band], 0);
+    deferSetting(4 + band, 0);
     lv_label_set_text(eqValueLabels[band], "+0 dB");
   }
-  xSemaphoreGive(configMutex);
   lastInputMs = millis();
 }
 static void eqAdjustButton(lv_obj_t *parent, const char *text, int x, int y,
@@ -1729,10 +1773,7 @@ static void changeCounty(lv_event_t *event) {
   weatherData[slot].summary = "更新中...";
   weatherSlot = slot;
   lastWeatherFlip = millis();
-  xSemaphoreTake(configMutex, portMAX_DELAY);
-  const String key = slot ? String("county") + slot : String("county");
-  prefs.putInt(key.c_str(), cfg.counties[slot]);
-  xSemaphoreGive(configMutex);
+  deferSetting(7 + slot, cfg.counties[slot]);
   lastWeatherAttempt = millis();
   if (networkTaskHandle) xTaskNotify(networkTaskHandle, kFetchWeather, eSetBits);
   lastInputMs = millis();
@@ -1743,17 +1784,13 @@ static void changeWeatherDisplay(lv_event_t *event) {
   if (field == 0) cfg.weatherMain = selected;
   else if (field == 1) cfg.weatherDetail = selected;
   else cfg.weatherThird = selected;
-  xSemaphoreTake(configMutex, portMAX_DELAY);
-  prefs.putInt(field == 0 ? "wx_main" : field == 1 ? "wx_detail" : "wx_third", selected);
-  xSemaphoreGive(configMutex);
+  deferSetting(10 + field, selected);
   if (networkTaskHandle) xTaskNotify(networkTaskHandle, kFetchWeather, eSetBits);
   lastInputMs = millis();
 }
 static void changeHourMode(lv_event_t *) {
   cfg.hour12 = !cfg.hour12;
-  xSemaphoreTake(configMutex, portMAX_DELAY);
-  prefs.putBool("hour12", cfg.hour12);
-  xSemaphoreGive(configMutex);
+  deferSetting(13, cfg.hour12);
   lv_label_set_text(lv_obj_get_child(hourModeButton, 0), cfg.hour12 ? "12 小時" : "24 小時");
   lastInputMs = millis();
 }
@@ -1792,11 +1829,17 @@ static void returnGeneralSettings(lv_event_t *) {
 static void updateMp3Screen() {
   if (!mp3TitleLabel) return;
   const int state = mp3State.load();
+  if (mp3ScanPending.load()) {
+    homeSetText(mp3StatusLabel, "搜尋中...");
+    return;
+  }
   if (mp3TrackCount) {
     const String &path = mp3Tracks[mp3SelectedTrack];
     const int slash = path.lastIndexOf('/');
     homeSetText(mp3TitleLabel, path.c_str() + slash + 1);
-    lv_label_set_text_fmt(mp3CountLabel, "%d / %d 首", mp3SelectedTrack + 1, mp3TrackCount);
+    char countText[40];
+    snprintf(countText, sizeof(countText), "%d / %d 首", mp3SelectedTrack + 1, mp3TrackCount);
+    homeSetText(mp3CountLabel, countText);
   } else {
     homeSetText(mp3TitleLabel, mp3StorageStatus);
     homeSetText(mp3CountLabel, "0 首");
@@ -1813,52 +1856,98 @@ static void updateMp3Screen() {
 
 static void scanMp3(lv_event_t *) {
   const int state = mp3State.load();
+  if (mp3ScanPending.load()) return;
   if (state == 1 || state == 2 || state == 3) {
     homeSetText(mp3StatusLabel, "請先停止播放再掃描");
     return;
   }
-  mp3TrackCount = 0;
-  mp3SelectedTrack = 0;
-  mp3Progress.store(0);
-  mp3State.store(0);
-  if (!deskFontSdMounted()) deskFontInitSd();
-  if (!deskFontSdMounted()) mp3StorageStatus = "SD 卡未掛載";
-  else {
+  mp3ScanPending.store(true);
+  mp3ScanRequested.store(true);
+  homeSetText(mp3StatusLabel, "搜尋中...");
+  lastInputMs = millis();
+}
+
+static void scanMp3InBackground() {
+  String tracks[kMp3MaxTracks];
+  int count = 0;
+  const char *status = "SD 卡未掛載";
+  // Mounting and directory traversal run without holding the LVGL mutex.
+  if (deskFontMountSd()) {
     File folder = SD_MMC.open("/music");
-    if (!folder || !folder.isDirectory()) mp3StorageStatus = "缺少 /music 資料夾";
+    if (!folder || !folder.isDirectory()) status = "缺少 /music 資料夾";
     else {
-      for (int seen = 0; seen < 256 && mp3TrackCount < kMp3MaxTracks; ++seen) {
+      for (int seen = 0; seen < 256 && count < kMp3MaxTracks; ++seen) {
         File entry = folder.openNextFile();
         if (!entry) break;
         if (!entry.isDirectory()) {
-          String path = entry.path();
-          String lower = path;
+          String path = entry.path(), lower = path;
           lower.toLowerCase();
           if (lower.endsWith(".mp3") && path.length() < sizeof(mp3RequestedPath))
-            mp3Tracks[mp3TrackCount++] = path;
+            tracks[count++] = path;
         }
         entry.close();
+        vTaskDelay(1);
       }
       folder.close();
-      for (int i = 1; i < mp3TrackCount; ++i) {
-        String item = mp3Tracks[i];
+      for (int i = 1; i < count; ++i) {
+        String item = tracks[i];
         int j = i;
-        while (j > 0 && mp3Tracks[j - 1].compareTo(item) > 0) {
-          mp3Tracks[j] = mp3Tracks[j - 1];
+        while (j > 0 && tracks[j - 1].compareTo(item) > 0) {
+          tracks[j] = tracks[j - 1];
           --j;
         }
-        mp3Tracks[j] = item;
+        tracks[j] = item;
       }
-      mp3StorageStatus = mp3TrackCount ? "已找到 MP3" : "找不到 MP3";
+      status = count ? "已找到 MP3" : "找不到 MP3";
     }
   }
-  updateMp3Screen();
-  lastInputMs = millis();
-  Serial.printf("[MP3] scan tracks=%d status=%s\n", mp3TrackCount, mp3StorageStatus);
+  if (lvgl_port_lock(-1)) {
+    // Only a newly inserted card needs font registration, which uses LVGL APIs.
+    if (deskFontSdMounted()) deskFontInitSd();
+    for (int i = 0; i < count; ++i) mp3Tracks[i] = std::move(tracks[i]);
+    for (int i = count; i < mp3TrackCount; ++i) mp3Tracks[i] = "";
+    mp3TrackCount = count;
+    mp3SelectedTrack = 0;
+    mp3StorageStatus = status;
+    mp3Progress.store(0);
+    mp3State.store(0);
+    mp3ScanPending.store(false);
+    updateMp3Screen();
+    lvgl_port_unlock();
+  }
+  Serial.printf("[MP3] scan tracks=%d status=%s\n", count, status);
+}
+
+static void settingsIoTask(void *) {
+  uint32_t lastDisplayReport = 0;
+  for (;;) {
+    if (mp3ScanRequested.exchange(false)) scanMp3InBackground();
+    flushPendingSettings();
+    const uint32_t report = pendingTouchReport.exchange(0);
+    if (report) {
+      const uint32_t point = report - 1;
+      const int x = point >> 16, y = point & 0xFFFF;
+      Serial.printf("[TOUCH] raw=%d,%d ui=%d,%d\n", x, y, y, kWidth - 1 - x);
+    }
+    const int page = pendingSettingsPageReport.exchange(-1);
+    if (page >= 0) Serial.printf("[UI] settings page=%d\n", page);
+    if ((uint32_t)(millis() - lastDisplayReport) >= 1000) {
+      lastDisplayReport = millis();
+      portENTER_CRITICAL(&lcdStatsMux);
+      const uint32_t frames = lcdFrames, rotate = lcdRotateMaxUs, transfer = lcdTransferMaxUs;
+      const uint32_t handler = uiHandlerMaxUs;
+      lcdFrames = lcdRotateMaxUs = lcdTransferMaxUs = uiHandlerMaxUs = 0;
+      portEXIT_CRITICAL(&lcdStatsMux);
+      if (frames) Serial.printf("[LCD] frames=%u rotate_max_us=%u transfer_max_us=%u ui_max_us=%u\n",
+                                (unsigned)frames, (unsigned)rotate, (unsigned)transfer,
+                                (unsigned)handler);
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
 }
 
 static void playSelectedMp3() {
-  if (!mp3TrackCount || !mp3RequestMutex) return;
+  if (mp3ScanPending.load() || !mp3TrackCount || !mp3RequestMutex) return;
   if (xSemaphoreTake(mp3RequestMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
   strlcpy(mp3RequestedPath, mp3Tracks[mp3SelectedTrack].c_str(), sizeof(mp3RequestedPath));
   xSemaphoreGive(mp3RequestMutex);
@@ -1886,7 +1975,7 @@ static void stopMp3(lv_event_t *) {
 }
 
 static void stepMp3(int delta) {
-  if (!mp3TrackCount) return;
+  if (mp3ScanPending.load() || !mp3TrackCount) return;
   mp3SelectedTrack = (mp3SelectedTrack + delta + mp3TrackCount) % mp3TrackCount;
   const int state = mp3State.load();
   if (state == 1 || state == 2 || state == 3) playSelectedMp3();
@@ -1919,10 +2008,11 @@ static void selectSettingsPage(uint8_t index) {
 static void settingsNavClicked(lv_event_t *event) {
   const uint8_t navIndex = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
   const uint8_t index = navIndex == 0 ? 0 : navIndex + 1;
+  const bool entering = lv_obj_has_flag(settingsPages[index], LV_OBJ_FLAG_HIDDEN);
   selectSettingsPage(index);
-  if (index == kMp3SettingsPage) scanMp3(nullptr);
+  if (index == kMp3SettingsPage && entering) scanMp3(nullptr);
   lastInputMs = millis();
-  Serial.printf("[UI] settings page=%u\n", index);
+  pendingSettingsPageReport.store(index);
 }
 
 static void refreshWeatherNow(lv_event_t *) {
@@ -2139,6 +2229,10 @@ static void buildSettings() {
   lv_bar_set_value(mp3ProgressBar, 0, LV_ANIM_OFF);
   button(mp3Page, LV_SYMBOL_LEFT, 400, 15, 55, 42, previousMp3);
   mp3PlayButton = button(mp3Page, LV_SYMBOL_PLAY, 463, 15, 80, 42, toggleMp3);
+  lv_timer_create([](lv_timer_t *) {
+    if (lv_screen_active() == settingsScreen && !lv_obj_has_flag(settingsPages[kMp3SettingsPage], LV_OBJ_FLAG_HIDDEN))
+      updateMp3Screen();
+  }, 20, nullptr);
   button(mp3Page, LV_SYMBOL_RIGHT, 551, 15, 55, 42, nextMp3);
   button(mp3Page, "停止", 400, 73, 90, 35, stopMp3);
   button(mp3Page, "重新掃描", 499, 73, 107, 35, scanMp3);
@@ -2847,10 +2941,12 @@ static void pollIndoorAht30(uint32_t now) {
 }
 
 static void refreshUi() {
+  tm t;
+  const bool timeReady = getLocalTime(&t, 10) && t.tm_year >= 124;
   if (!lvgl_port_lock(100)) return;
-  tm t; char clockText[12] = "--:--", dateText[40] = "---- / -- / --";
+  char clockText[12] = "--:--", dateText[40] = "---- / -- / --";
   const char *period = "";
-  if (getLocalTime(&t, 10) && t.tm_year >= 124) {
+  if (timeReady) {
     strftime(clockText, sizeof(clockText), cfg.hour12 ? "%I:%M" : "%H:%M", &t);
     if (cfg.hour12) period = t.tm_hour < 12 ? "AM" : "PM";
     static const char *weekdays[] = {"日", "一", "二", "三", "四", "五", "六"};
@@ -2861,8 +2957,13 @@ static void refreshUi() {
   homeSetText(clockPeriodLabel, period);
   homeSetText(dateLabel, dateText);
   char status[28];
-  snprintf(status, sizeof(status), batteryPresent() ? "Wi-Fi · %d%%" : "Wi-Fi",
-           batteryPct);
+  if (batteryPresent()) {
+    const int centivolts = (batteryMv + 5) / 10;
+    snprintf(status, sizeof(status), "Wi-Fi · %d.%02dV", centivolts / 100,
+             centivolts % 100);
+  } else {
+    snprintf(status, sizeof(status), "Wi-Fi");
+  }
   homeSetText(wifiLabel, status);
   static bool wifiColorReady = false, wifiColorConnected = false;
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
@@ -2939,8 +3040,8 @@ void setup() {
   else Serial.println("[RTC] invalid/unavailable");
   Serial.printf("[BAT] %dmV %d%% (voltage estimate)\n", batteryMv, batteryPct);
   Serial.printf("[BAT] display mode=%d\n", cfg.batteryMode);
+  lcd_bl_pwm_bsp_init(255); // Active-low backlight: keep startup panel RAM hidden.
   lvgl_port_init();
-  lcd_bl_pwm_bsp_init(backlightDuty(cfg.brightness));
   if (lvgl_port_lock(2000)) {
     deskFontInitSd();
     buildHome(); buildSettings(); buildStockScreen();
@@ -2954,6 +3055,16 @@ void setup() {
                   (unsigned)ESP.getFreePsram());
     lvgl_port_unlock();
   }
+  else {
+    Serial.println("[LCD] UI initialization lock failed");
+    abort();
+  }
+  if (!lvgl_port_start(5000)) {
+    Serial.println("[LCD] first frame timeout");
+    abort();
+  }
+  setUpduty(backlightDuty(cfg.brightness));
+  Serial.println("[LCD] home first frame sent; backlight enabled");
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(false);
   WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
@@ -2968,6 +3079,11 @@ void setup() {
   if (xTaskCreatePinnedToCore(networkTask, "network", 8192, nullptr, 1,
                               &networkTaskHandle, 0) != pdPASS)
     Serial.println("[NETWORK] task creation failed");
+  if (xTaskCreatePinnedToCore(settingsIoTask, "settings IO", 8192, nullptr, 1,
+                              nullptr, 0) != pdPASS) {
+    Serial.println("[SETTINGS] task creation failed");
+    abort();
+  }
   lastInputMs = millis();
   Serial.printf("[DeskDock] ready at %u ms\n", (unsigned)millis());
 }

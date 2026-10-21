@@ -135,20 +135,28 @@ static lv_fs_res_t sdFontTell(lv_fs_drv_t *, void *handle, uint32_t *position) {
 
 bool deskFontSdMounted() { return sdMounted; }
 
-void deskFontInitSd() {
-  if (sdMounted) return;
-  const uint32_t startedAt = millis();
+bool deskFontMountSd() {
+  if (sdMounted) return true;
   if (!SD_MMC.setPins(41, 39, 40) ||
       !SD_MMC.begin("/sdcard", true, false, BOARD_MAX_SDMMC_FREQ, 20)) {
     Serial.println("[FONT] SD unavailable; using built-in glyphs");
-    return;
+    return false;
   }
   if (SD_MMC.cardType() == CARD_NONE) {
     SD_MMC.end();
     Serial.println("[FONT] SD unavailable; using built-in glyphs");
-    return;
+    return false;
   }
   sdMounted = true;
+  return true;
+}
+
+void deskFontInitSd() {
+  static bool fontsRegistered = false;
+  if (fontsRegistered) return;
+  const uint32_t startedAt = millis();
+  if (!deskFontMountSd()) return;
+  fontsRegistered = true;
   lv_fs_drv_init(&sdFontFs);
   sdFontFs.letter = 'S';
   sdFontFs.cache_size = 1024;

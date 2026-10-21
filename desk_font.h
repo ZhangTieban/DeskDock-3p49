@@ -17,3 +17,5 @@ extern lv_font_t desk_font_93;
 
 void deskFontInitSd();
 bool deskFontSdMounted();
+
+bool deskFontMountSd();

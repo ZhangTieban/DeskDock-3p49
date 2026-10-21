@@ -10,6 +10,7 @@ extern "C" {
 
 
 void lvgl_port_init(void);
+bool lvgl_port_start(int first_frame_timeout_ms);
 bool lvgl_port_lock(int timeout_ms);
 void lvgl_port_unlock(void);
 
