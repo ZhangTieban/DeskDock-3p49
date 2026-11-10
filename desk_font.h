@@ -13,7 +13,7 @@ extern lv_font_t desk_font_34;
 extern lv_font_t desk_font_58;
 extern lv_font_t desk_font_70;
 extern lv_font_t desk_font_86;
-extern lv_font_t desk_font_93;
+extern lv_font_t desk_font_88;
 
 void deskFontInitSd();
 bool deskFontSdMounted();

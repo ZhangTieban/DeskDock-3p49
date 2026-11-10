@@ -4,6 +4,61 @@ static constexpr int kHomeRightW = 313;
 static constexpr int kHomeContentW = 285;
 static constexpr int kHomeStockContentW = kHomeContentW - 16;
 static constexpr int kHomeStockH = 104;
+static constexpr int kHomeTabHeight = 172 / kHomeCarouselCount;
+static constexpr uint32_t kHomeBackground = 0x070B0A;
+
+// 16 x 16 icons with four-color palettes. Palette entry zero is transparent.
+alignas(4) static const uint8_t kHomeMapleLeafPixels[] = {
+  0x00, 0x00, 0x00, 0x00, 0x47, 0x78, 0xF3, 0xFF, 0x32, 0x4B, 0xD9, 0xFF, 0x37, 0x56, 0xAB, 0xFF,  // BGRA palette
+  0x00, 0x01, 0x00, 0x00,
+  0x00, 0x05, 0x80, 0x00,
+  0x00, 0x05, 0x80, 0x00,
+  0x04, 0x05, 0x40, 0x80,
+  0x05, 0x05, 0x41, 0x80,
+  0x15, 0x45, 0x45, 0x90,
+  0x05, 0x55, 0x59, 0x60,
+  0x01, 0x55, 0x95, 0x80,
+  0x15, 0x55, 0x95, 0x58,
+  0x05, 0x55, 0x95, 0xA0,
+  0x01, 0x55, 0x96, 0x80,
+  0x00, 0x5A, 0xA6, 0x00,
+  0x00, 0x22, 0x28, 0x00,
+  0x00, 0x03, 0x00, 0x00,
+  0x00, 0x0C, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00,
+};
+
+alignas(4) static const uint8_t kHomeBirthdayCakePixels[] = {
+  0x00, 0x00, 0x00, 0x00, 0xAE, 0xE1, 0xFD, 0xFF, 0x98, 0x78, 0xEA, 0xFF, 0x45, 0xB1, 0xF4, 0xFF,  // BGRA palette
+  0x00, 0x03, 0x00, 0x00,
+  0x00, 0x0F, 0x00, 0x00,
+  0x00, 0x0F, 0xC0, 0x00,
+  0x00, 0x02, 0x00, 0x00,
+  0x00, 0x02, 0x00, 0x00,
+  0x00, 0x55, 0x55, 0x00,
+  0x01, 0x55, 0x55, 0x40,
+  0x05, 0x55, 0x55, 0x50,
+  0x0A, 0x5A, 0x5A, 0x50,
+  0x0A, 0x96, 0x5A, 0xA0,
+  0x0A, 0xAA, 0xAA, 0xA0,
+  0x0A, 0xAA, 0xAA, 0xA0,
+  0x05, 0x55, 0x55, 0x50,
+  0x15, 0x55, 0x55, 0x54,
+  0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00,
+};
+
+static constexpr lv_image_header_t kOccasionIconHeader = {
+  .magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_I2, .w = 16, .h = 16, .stride = 4
+};
+static const lv_image_dsc_t kHomeMapleLeaf = {
+  .header = kOccasionIconHeader,
+  .data_size = sizeof(kHomeMapleLeafPixels), .data = kHomeMapleLeafPixels
+};
+static const lv_image_dsc_t kHomeBirthdayCake = {
+  .header = kOccasionIconHeader,
+  .data_size = sizeof(kHomeBirthdayCakePixels), .data = kHomeBirthdayCakePixels
+};
 
 static void homeSetText(lv_obj_t *item, const String &text) {
   if (item && strcmp(lv_label_get_text(item), text.c_str()))
@@ -204,20 +259,25 @@ static void homeVisible(lv_obj_t *item, bool visible) {
 }
 
 static void showHomeCarousel(uint8_t page) {
-  homeCarouselPage = page % 3;
+  const bool enteringMp3 = homeCarouselPage != kHomeMp3Page && page == kHomeMp3Page;
+  homeCarouselPage = page;
   if (homeCarouselPage == 0) lastWeatherFlip = millis();
   if (homeCarouselPage == 1) lastFooterFlip = millis();
   homeVisible(homeWeatherPane, homeCarouselPage == 0);
   homeVisible(homeStockPane, homeCarouselPage == 1);
   homeVisible(homeRadioPane, homeCarouselPage == 2);
-  for (uint8_t i = 0; i < 3; ++i) {
+  homeVisible(homeMp3Pane, homeCarouselPage == kHomeMp3Page);
+  for (uint8_t i = 0; i < kHomeCarouselCount; ++i) {
     const bool active = i == homeCarouselPage;
     lv_obj_t *bar = lv_obj_get_child(homeCarouselTabs[i], 0);
-    lv_obj_set_pos(bar, active ? 15 : 17, active ? 15 : 19);
-    lv_obj_set_size(bar, active ? 8 : 4, active ? 26 : 18);
+    const int height = active ? 26 : 18;
+    lv_obj_set_pos(bar, active ? 15 : 17, (kHomeTabHeight - height) / 2);
+    lv_obj_set_size(bar, active ? 8 : 4, height);
     lv_obj_set_style_bg_color(bar,
         lv_color_hex(active ? 0x83D7BB : 0x536E5D), 0);
   }
+  if (enteringMp3 && !mp3TrackCount) requestMp3Scan();
+  if (homeCarouselPage == kHomeMp3Page) updateMp3Screen();
 }
 
 static void selectHomeCarousel(lv_event_t *event) {
@@ -226,7 +286,7 @@ static void selectHomeCarousel(lv_event_t *event) {
 
 static void swipeHomeCarousel(lv_event_t *) {
   const lv_dir_t direction = lv_indev_get_gesture_dir(lv_indev_active());
-  if (direction == LV_DIR_TOP && homeCarouselPage < 2) {
+  if (direction == LV_DIR_TOP && homeCarouselPage + 1 < kHomeCarouselCount) {
     showHomeCarousel(homeCarouselPage + 1);
     lv_indev_wait_release(lv_indev_active());
   } else if (direction == LV_DIR_BOTTOM && homeCarouselPage > 0) {
@@ -258,7 +318,7 @@ static void updateHomeWeatherIcon() {
 
 static void updateHomeRadio() {
   const int station = radioStation.load();
-  const int state = radioState.load();
+  const int state = radioUiState();
   static int renderedState = -1;
   const String stationName = station ? String(kRadioNames[station - 1]) : String("選擇電台");
   if (strcmp(lv_label_get_text(homeRadioStation), stationName.c_str())) {
@@ -286,13 +346,14 @@ static void updateHomeRadio() {
 
 static void refreshHomeRows(uint32_t now) {
   const uint32_t rotateMs = (uint32_t)cfg.carouselSeconds * 1000UL;
-  if (homeCarouselPage == 0 && (uint32_t)(now - lastWeatherFlip) >= rotateMs) {
+  if (!cfg.carouselPaused && homeCarouselPage == 0 &&
+      (uint32_t)(now - lastWeatherFlip) >= rotateMs) {
     weatherSlot = (weatherSlot + 1) % kWeatherSlots;
     lastWeatherFlip = now;
   }
   setWeatherPage(weatherPageA);
   if (!footerAnimating) setFooterPage(footerPageA, footerPage);
-  if (homeCarouselPage == 1 && !footerAnimating &&
+  if (!cfg.carouselPaused && homeCarouselPage == 1 && !footerAnimating &&
       (uint32_t)(now - lastFooterFlip) >= rotateMs) advanceFooter(nullptr);
   String indexValue, indexChange, indexStamp;
   splitStockLine(remote.index, 1, indexValue, indexChange, indexStamp);
@@ -312,10 +373,6 @@ static void refreshHomeRows(uint32_t now) {
   String weatherTitle = kCounties[cfg.counties[weatherSlot]];
   if (weatherTitle.length() <= 6) weatherTitle += " · 天氣";
   homeSetText(homeWeatherTitle, weatherTitle);
-  homeSetText(homeIndoorTemperature,
-              indoorValid ? String((int)lroundf(indoorTemperature)) + "°C" : String("--°C"));
-  homeSetText(homeIndoorHumidity,
-              indoorValid ? String((int)lroundf(indoorHumidity)) + "%" : String("--%"));
 }
 
 static lv_obj_t *homeControl(lv_obj_t *parent, const char *icon, const char *caption,
@@ -345,25 +402,35 @@ static void homeCloudPart(lv_obj_t *parent, int x, int y, int w, int h) {
   lv_obj_clear_flag(part, LV_OBJ_FLAG_SCROLLABLE);
 }
 
+#include "home_dog.inc"
+
 static void buildHome() {
   homeScreen = lv_obj_create(nullptr);
-  lv_obj_set_style_bg_color(homeScreen, lv_color_hex(0x070B0A), 0);
+  lv_obj_set_style_bg_color(homeScreen, lv_color_hex(kHomeBackground), 0);
   lv_obj_set_style_pad_all(homeScreen, 0, 0);
   lv_obj_clear_flag(homeScreen, LV_OBJ_FLAG_SCROLLABLE);
   homeRule(homeScreen, 307, 8, 1, 156);
 
-  clockLabel = label(homeScreen, "--:--", -12, 24, 298, 93);
-  lv_obj_set_style_text_font(clockLabel, &desk_font_93, 0);
+  clockLabel = label(homeScreen, "--:--", 8, 8, 298, 88);
+  lv_obj_set_style_text_font(clockLabel, &desk_font_88, 0);
   lv_obj_set_style_text_align(clockLabel, LV_TEXT_ALIGN_CENTER, 0);
-  dateLabel = label(homeScreen, "", 11, 133, 286);
+  dateLabel = label(homeScreen, "", 11, 116, 286);
   lv_obj_set_style_text_font(dateLabel, &desk_font_16_bold, 0);
   lv_obj_set_style_text_align(dateLabel, LV_TEXT_ALIGN_CENTER, 0);
-  clockPeriodLabel = label(homeScreen, "", 254, 111, 43);
+  buildHomeDog();
+  clockPeriodLabel = label(homeScreen, "", 262, 95, 43);
   lv_obj_set_style_text_font(clockPeriodLabel, &desk_font_10_bold, 0);
   lv_obj_set_style_text_align(clockPeriodLabel, LV_TEXT_ALIGN_RIGHT, 0);
 
   wifiLabel = label(homeScreen, "Wi-Fi", 12, 9, 210);
   lv_obj_set_style_text_font(wifiLabel, &desk_font_10_bold, 0);
+  occasionLabel = label(homeScreen, "", 82, 7, 145);
+  lv_obj_set_style_text_font(occasionLabel, &desk_font_14_bold, 0);
+  lv_obj_set_style_text_align(occasionLabel, LV_TEXT_ALIGN_RIGHT, 0);
+  lv_obj_set_style_text_color(occasionLabel, lv_color_hex(0xF2C64B), 0);
+  occasionIcon = lv_image_create(homeScreen);
+  lv_obj_set_pos(occasionIcon, 231, 8);
+  lv_obj_add_flag(occasionIcon, LV_OBJ_FLAG_HIDDEN);
 
   homeStockPane = lv_obj_create(homeScreen);
   lv_obj_set_pos(homeStockPane, kHomeRightX, 4);
@@ -423,19 +490,6 @@ static void buildHome() {
   lv_obj_remove_flag(homeWeatherPane, LV_OBJ_FLAG_GESTURE_BUBBLE);
   homeWeatherTitle = label(homeWeatherPane, "臺北 · 天氣", 0, 8, 103);
   lv_obj_set_style_text_font(homeWeatherTitle, &desk_font_16_bold, 0);
-  homeRule(homeWeatherPane, 108, 5, 1, 22);
-  lv_obj_t *indoorTemperatureTitle = label(homeWeatherPane, "溫度", 116, 8, 34);
-  lv_obj_set_style_text_font(indoorTemperatureTitle, &desk_font_16_bold, 0);
-  lv_obj_set_style_text_color(indoorTemperatureTitle, lv_color_hex(0xAABBB1), 0);
-  homeIndoorTemperature = label(homeWeatherPane, "--°C", 151, 8, 49);
-  lv_obj_set_style_text_font(homeIndoorTemperature, &desk_font_16_bold, 0);
-  lv_obj_set_style_text_align(homeIndoorTemperature, LV_TEXT_ALIGN_RIGHT, 0);
-  lv_obj_t *indoorHumidityTitle = label(homeWeatherPane, "濕度", 206, 8, 34);
-  lv_obj_set_style_text_font(indoorHumidityTitle, &desk_font_16_bold, 0);
-  lv_obj_set_style_text_color(indoorHumidityTitle, lv_color_hex(0xAABBB1), 0);
-  homeIndoorHumidity = label(homeWeatherPane, "--%", 241, 8, 44);
-  lv_obj_set_style_text_font(homeIndoorHumidity, &desk_font_16_bold, 0);
-  lv_obj_set_style_text_align(homeIndoorHumidity, LV_TEXT_ALIGN_RIGHT, 0);
   homeRule(homeWeatherPane, 0, 33, kHomeContentW, 1);
   lv_obj_t *weatherCard = lv_obj_create(homeWeatherPane);
   lv_obj_set_pos(weatherCard, 0, 39);
@@ -506,6 +560,32 @@ static void buildHome() {
                                50, noAction);
   lv_obj_add_event_cb(next, stepRadio, LV_EVENT_PRESSED, (void *)(intptr_t)1);
 
+  homeMp3Pane = lv_obj_create(homeScreen);
+  lv_obj_set_pos(homeMp3Pane, kHomeRightX, 4);
+  lv_obj_set_size(homeMp3Pane, kHomeContentW, 164);
+  lv_obj_set_style_pad_all(homeMp3Pane, 0, 0);
+  lv_obj_set_style_bg_opa(homeMp3Pane, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(homeMp3Pane, 0, 0);
+  lv_obj_clear_flag(homeMp3Pane, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t *mp3Heading = label(homeMp3Pane, "MP3", 0, 8, 125);
+  lv_obj_set_style_text_font(mp3Heading, &desk_font_16_bold, 0);
+  homeRule(homeMp3Pane, 0, 33, kHomeContentW, 1);
+  homeMp3.title = label(homeMp3Pane, "尚未掃描", 0, 43, kHomeContentW);
+  lv_obj_set_style_text_font(homeMp3.title, &desk_font_16_bold, 0);
+  lv_label_set_long_mode(homeMp3.title, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+  lv_obj_set_height(homeMp3.title, lv_font_get_line_height(&desk_font_16_bold));
+  homeMp3.status = label(homeMp3Pane, "", 0, 67, 170);
+  homeMp3.count = label(homeMp3Pane, "", 175, 67, kHomeContentW - 175);
+  lv_obj_set_style_text_align(homeMp3.count, LV_TEXT_ALIGN_RIGHT, 0);
+  homeMp3.progress = lv_bar_create(homeMp3Pane);
+  lv_obj_set_pos(homeMp3.progress, 0, 92);
+  lv_obj_set_size(homeMp3.progress, kHomeContentW, 6);
+  lv_bar_set_range(homeMp3.progress, 0, kMp3ProgressWidth);
+  button(homeMp3Pane, LV_SYMBOL_LEFT, 12, 107, 50, 43, previousMp3);
+  homeMp3.play = button(homeMp3Pane, LV_SYMBOL_PLAY, 72, 107, 137, 43, toggleMp3);
+  lv_obj_set_style_bg_color(homeMp3.play, lv_color_hex(0x398C62), 0);
+  button(homeMp3Pane, LV_SYMBOL_RIGHT, 219, 107, 50, 43, nextMp3);
+
   homeCarouselSwitch = lv_obj_create(homeScreen);
   lv_obj_set_pos(homeCarouselSwitch, kHomeRightX + kHomeContentW, 0);
   lv_obj_set_size(homeCarouselSwitch, kWidth - (kHomeRightX + kHomeContentW), 172);
@@ -517,11 +597,11 @@ static void buildHome() {
   lv_obj_clear_flag(homeCarouselSwitch, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_remove_flag(homeCarouselSwitch, LV_OBJ_FLAG_GESTURE_BUBBLE);
   lv_obj_add_event_cb(homeCarouselSwitch, swipeHomeCarousel, LV_EVENT_GESTURE, nullptr);
-  for (uint8_t i = 0; i < 3; ++i) {
+  for (uint8_t i = 0; i < kHomeCarouselCount; ++i) {
     lv_obj_t *tab = lv_button_create(homeCarouselSwitch);
     homeCarouselTabs[i] = tab;
-    lv_obj_set_pos(tab, 1, 1 + i * 57);
-    lv_obj_set_size(tab, kWidth - (kHomeRightX + kHomeContentW) - 2, 56);
+    lv_obj_set_pos(tab, 1, i * kHomeTabHeight);
+    lv_obj_set_size(tab, kWidth - (kHomeRightX + kHomeContentW) - 2, kHomeTabHeight);
     lv_obj_set_style_pad_all(tab, 0, 0);
     lv_obj_set_style_border_width(tab, 0, 0);
     lv_obj_set_style_radius(tab, 4, 0);

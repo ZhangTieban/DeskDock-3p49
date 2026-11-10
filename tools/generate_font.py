@@ -17,6 +17,7 @@ TEXT = (
     "彰化投雲嘉義屏東宜蘭花蓮東澎湖金門江連馬祖轉圈"
     "測版號今明小時週日一二三四五六"
     "價或林灣示與象顯／：搜尋優刪除記憶需開文字放英數空白有符重大夜盤充個不足月"
+    "再室"  # Keep previously bundled glyphs for dynamic filenames and labels.
 )
 ASCII = "".join(chr(i) for i in range(32, 127))
 SOURCE_UNICODE = "".join(
@@ -75,7 +76,7 @@ def emit_font(size, chars, font_path=FONT, suffix="", weight=None):
 content = "// Generated from Noto Sans TC, D-DIN, Noto Sans Symbols (SIL OFL). Do not edit by hand.\n"
 content += emit_font(16, ASCII + TEXT + SOURCE_UNICODE) + "\n"
 content += emit_font(16, ASCII + TEXT + SOURCE_UNICODE, suffix="_bold", weight=700) + "\n"
-content += emit_font(14, "最高最低成交量股降雨濕度體感風速日落UV 0123456789.,:/%°Ckmh-", suffix="_bold", weight=700) + "\n"
+content += emit_font(14, "最高最低成交量股降雨濕度體感風速日落認識阿喵周年生日快樂~UV 0123456789.,:/%°Ckmh-", suffix="_bold", weight=700) + "\n"
 content += emit_font(10, "上一台播放暫停下降雨更新預報資料 Wi-Fi·0123456789:/%", suffix="_bold", weight=700) + "\n"
 content += emit_font(18, "0123456789 /-", DIN_REGULAR) + "\n"
 content += emit_font(20, ASCII + TEXT + SOURCE_UNICODE) + "\n"
@@ -86,5 +87,5 @@ content += emit_font(34, "⚙", SYMBOL_FONT) + "\n"
 content += emit_font(58, "0123456789/", HANKEN, weight=700) + "\n"
 content += emit_font(70, "0123456789:-") + "\n"
 content += emit_font(86, "0123456789:-", DIN) + "\n"
-content += emit_font(93, "0123456789:-", HANKEN, weight=700) + "\n"
+content += emit_font(88, "0123456789:-", HANKEN, weight=700) + "\n"
 (ROOT / "desk_font_data.inc").write_text(content, encoding="ascii")

@@ -102,6 +102,7 @@ struct Config {
   int eqDb[3] = {0, 0, 0};
   int weatherMain = 0, weatherDetail = 1, weatherThird = 4;
   int carouselSeconds = 10;
+  bool carouselPaused = false;
   bool hour12 = false;
   int batteryMode = 2; // 0: voltage fallback, 1: installed, 2: absent
 };
@@ -123,10 +124,6 @@ struct RemoteData {
 static Config cfg;
 static RemoteData remote;
 static WeatherData weatherData[kWeatherSlots];
-static float indoorTemperature = 0, indoorHumidity = 0;
-static bool indoorValid = false;
-static bool aht30Pending = false;
-static uint32_t aht30StartedAt = 0, aht30NextAt = 0;
 static uint8_t weatherSlot = 0;
 static uint32_t lastWeatherFlip = 0;
 static SemaphoreHandle_t configMutex;
@@ -142,7 +139,7 @@ static PendingSetting pendingSettings[] = {
   {"home_rotate", 0, false}, {"eq_b", 0, false}, {"eq_m", 0, false},
   {"eq_t", 0, false}, {"county", 0, false}, {"county1", 0, false},
   {"county2", 0, false}, {"wx_main", 0, false}, {"wx_detail", 0, false},
-  {"wx_third", 0, false}, {"hour12", 0, true}
+  {"wx_third", 0, false}, {"hour12", 0, true}, {"rotate_pause", 0, true}
 };
 static std::atomic<uint32_t> pendingSettingsMask{0}, settingsChangedAt{0};
 static std::atomic<bool> ntpSynced{false};
@@ -157,17 +154,24 @@ static constexpr int kMp3PlayCommand = 100;
 static constexpr int kMp3PauseCommand = -3;
 static constexpr int kMp3ResumeCommand = -4;
 static constexpr int kMp3MaxTracks = 32;
+static constexpr uint32_t kMp3UiPeriodMs = 100;
+static constexpr int kMp3ProgressWidth = 237;
+static constexpr size_t kMp3PathSize = 192;
+enum class Mp3Repeat : uint8_t { Off, One, List };
 static std::atomic<int> radioCommand{-1}; // -1 none, -2 failed, 0 stop, 1..9 station, 100 SD MP3
 static std::atomic<int> radioState{0}; // 0 stopped, 1 connecting, 2 playing, 3 failed
 static std::atomic<int> radioStation{0};
 static std::atomic<int> mp3State{0}; // 0 stopped, 1 opening, 2 playing, 3 paused, 4 failed, 5 ended
 static std::atomic<int> mp3Progress{0}; // 0..1000, based on file bytes
+static std::atomic<Mp3Repeat> mp3Repeat{Mp3Repeat::Off};
 static SemaphoreHandle_t mp3RequestMutex;
-static char mp3RequestedPath[192] = {};
+static int mp3RequestedTrack = 0;
 static String mp3Tracks[kMp3MaxTracks];
-static int mp3TrackCount = 0, mp3SelectedTrack = 0;
+static int mp3TrackCount = 0;
+static std::atomic<int> mp3SelectedTrack{0};
 static const char *mp3StorageStatus = "尚未掃描";
 static std::atomic<bool> mp3ScanPending{false}, mp3ScanRequested{false};
+
 static std::atomic<int> eqGain[3];
 static TaskHandle_t radioTaskHandle = nullptr;
 static TaskHandle_t networkTaskHandle = nullptr;
@@ -274,18 +278,24 @@ static constexpr uint8_t kRadioSettingsPage = 5;
 static constexpr uint8_t kMp3SettingsPage = 6;
 static lv_obj_t *settingsPages[kSettingsPages], *settingsNavButtons[kSettingsNavCount];
 static lv_obj_t *settingsNavIndicators[kSettingsNavCount];
-static lv_obj_t *mp3TitleLabel, *mp3StatusLabel, *mp3CountLabel;
-static lv_obj_t *mp3PlayButton, *mp3ProgressBar;
+struct Mp3Panel {
+  lv_obj_t *title, *status, *count, *play, *progress;
+};
+static Mp3Panel settingsMp3, homeMp3;
+static lv_obj_t *mp3RepeatButton;
 static lv_obj_t *clockLabel, *clockPeriodLabel, *dateLabel, *wifiLabel;
+static lv_obj_t *occasionLabel, *occasionIcon;
 static lv_obj_t *footerPageA, *footerPageB;
 static uint8_t footerPage = 0;
 static uint32_t lastFooterFlip = 0;
 static bool footerAnimating = false;
 static lv_obj_t *weatherPageA, *homeWeatherTitle;
-static lv_obj_t *homeWeatherPane, *homeStockPane, *homeRadioPane;
-static lv_obj_t *homeCarouselSwitch, *homeCarouselTabs[3];
+static constexpr uint8_t kHomeCarouselCount = 4;
+static constexpr uint8_t kHomeMp3Page = kHomeCarouselCount - 1;
+static lv_obj_t *homeWeatherPane, *homeStockPane, *homeRadioPane, *homeMp3Pane;
+static lv_obj_t *homeCarouselSwitch, *homeCarouselTabs[kHomeCarouselCount];
 static lv_obj_t *homeStockIndexLabel, *homeStockChangeLabel, *carouselValueLabel;
-static lv_obj_t *homeIndoorTemperature, *homeIndoorHumidity;
+static lv_obj_t *carouselPauseButton;
 static uint8_t homeCarouselPage = 0;
 static lv_obj_t *weatherSun, *weatherMoon, *weatherCloud;
 static lv_obj_t *weatherRainIcon, *stockPositionDots[kMaxStocks];
@@ -306,6 +316,11 @@ static lv_obj_t *editorReturnScreen;
 static void openStocks(lv_event_t *);
 static void openRadio(lv_event_t *);
 static void selectSettingsPage(uint8_t index);
+static void requestMp3Scan();
+static void updateMp3Screen();
+static void toggleMp3(lv_event_t *);
+static void previousMp3(lv_event_t *);
+static void nextMp3(lv_event_t *);
 static void toggleRadio(lv_event_t *);
 static void stepRadio(lv_event_t *);
 static void editStock(lv_event_t *);
@@ -417,6 +432,7 @@ static void loadConfig() {
   cfg.weatherDetail = constrain(prefs.getInt("wx_detail", 1), 0, kWeatherMetrics - 1);
   cfg.weatherThird = constrain(prefs.getInt("wx_third", 4), 0, kWeatherMetrics - 1);
   cfg.carouselSeconds = constrain(prefs.getInt("home_rotate", 10), 5, 60);
+  cfg.carouselPaused = prefs.getBool("rotate_pause", false);
   cfg.batteryMode = constrain(prefs.getInt("batt_mode2", 2), 0, 3);
   if (cfg.batteryMode == 3) {
     cfg.batteryMode = 0;
@@ -856,7 +872,30 @@ class RadioI2SOutput : public AudioOutputI2S {
   }
   bool codecConfigured() const { return codecRate > 0; }
 
+  bool pauseOutput() {
+    if (!i2sOn || txPaused || i2s_channel_disable(_tx_handle) != ESP_OK) return false;
+    txPaused = true;
+    return true;
+  }
+
+  bool resumeOutput() {
+    if (!txPaused || i2s_channel_enable(_tx_handle) != ESP_OK) return false;
+    txPaused = false;
+    return true;
+  }
+
+  bool stop() override {
+    if (!txPaused) return AudioOutputI2S::stop();
+    // Paused TX is already disabled; it can be deleted directly.
+    if (i2s_del_channel(_tx_handle) != ESP_OK) return false;
+    _tx_handle = nullptr;
+    i2sOn = false;
+    txPaused = false;
+    return true;
+  }
+
  private:
+  bool txPaused = false;
   void updateEq(bool force) {
     const int bass = eqGain[0].load(std::memory_order_relaxed);
     const int mid = eqGain[1].load(std::memory_order_relaxed);
@@ -898,10 +937,13 @@ static void radioAudioTask(void *) {
   uint8_t *encodedBuffer = nullptr;
   AudioGenerator *decoder = nullptr;
   RadioI2SOutput *output = nullptr;
+  bool mp3AtEof = false;
+  int playingMp3Track = 0;
+  uint32_t lastMp3ProgressMs = 0;
   bool driverSwitched = false;
   uint32_t lastAudioReport = 0;
   uint32_t playingSinceMs = 0, retryAtMs = 0;
-  int retryStation = 0;
+  int activeRadioStation = 0, retryStation = 0;
   uint8_t retryCount = 0;
   wifi_ps_type_t previousWifiSleep = WIFI_PS_MIN_MODEM;
   bool wifiSleepChanged = false;
@@ -929,10 +971,35 @@ static void radioAudioTask(void *) {
   for (;;) {
     int command = radioCommand.exchange(-1);
     if (command == kMp3PauseCommand || command == kMp3ResumeCommand) {
-      if (command == kMp3PauseCommand && mp3State.load() == 2) mp3State.store(3);
-      if (command == kMp3ResumeCommand && mp3State.load() == 3) mp3State.store(2);
+      const bool pause = command == kMp3PauseCommand;
+      const int state = mp3State.load();
+      if (output && state == (pause ? 2 : 3)) {
+        // Merely stopping the decoder leaves old samples cycling in DMA.
+        const bool ok = pause ? output->pauseOutput() : output->resumeOutput();
+        if (ok) {
+          mp3State.store(pause ? 3 : 2);
+          Serial.println(pause ? "[MP3] paused" : "[MP3] resumed");
+        } else {
+          closeStream();
+          restoreI2s();
+          mp3State.store(4);
+          Serial.println(pause ? "[MP3] pause failed" : "[MP3] resume failed");
+        }
+      } else if (pause && mp3AtEof) {
+        mp3AtEof = false;
+        restoreI2s();
+        mp3State.store(5);
+      }
       command = -1;
     }
+    const Mp3Repeat repeatMode = mp3Repeat.load();
+    const bool repeatingMp3 = mp3AtEof && command == -1 && repeatMode != Mp3Repeat::Off;
+    if (mp3AtEof && command == -1 && !repeatingMp3) {
+      restoreI2s();
+      mp3State.store(5);
+    }
+    mp3AtEof = false;
+    if (repeatingMp3) command = kMp3PlayCommand;
     bool automaticRetry = false;
     if (command == -1 && retryStation && WiFi.status() == WL_CONNECTED &&
         (int32_t)(millis() - retryAtMs) >= 0) {
@@ -943,7 +1010,9 @@ static void radioAudioTask(void *) {
     }
     if (command != -1) {
       const bool mp3Requested = command == kMp3PlayCommand;
-      const bool wasMp3 = mp3State.load() != 0;
+      const int previousMp3State = mp3State.load();
+      const int previousRadioState = radioState.load();
+      if (command > 0 && !mp3Requested) activeRadioStation = command;
       if (command == 0 || mp3Requested || (command > 0 && !automaticRetry)) {
         retryStation = 0;
         retryCount = 0;
@@ -951,6 +1020,10 @@ static void radioAudioTask(void *) {
       radioState.store(mp3Requested ? 0 : command > 0 ? 1 : command == -2 ? 3 : 0);
       mp3State.store(mp3Requested ? 1 : 0);
       closeStream();
+      if (mp3Requested && (previousRadioState == 1 || previousRadioState == 2))
+        Serial.println("[RADIO] stopped for MP3");
+      if (command > 0 && !mp3Requested && previousMp3State >= 1 && previousMp3State <= 3)
+        Serial.println("[MP3] stopped for radio");
       const bool canStartRadio = audioReady || driverSwitched;
       if (command <= 0) restoreI2s();
       if (command > 0 && !mp3Requested && !wifiSleepChanged) {
@@ -961,19 +1034,32 @@ static void radioAudioTask(void *) {
         wifiSleepChanged = false;
       }
       if (command <= 0) {
-        Serial.println(command == 0 && wasMp3 ? "[MP3] stopped" :
+        Serial.println(command == 0 && previousMp3State != 0 ? "[MP3] stopped" :
                        command == 0 ? "[RADIO] stopped" : "[RADIO] stopped after error");
-        if (command == -2 && retryCount < 3 && radioStation.load() > 0) {
+        if (command == -2 && retryCount < 3 && activeRadioStation > 0) {
           static constexpr uint32_t kRetryDelaysMs[] = {3000, 10000, 30000};
-          retryStation = radioStation.load();
+          retryStation = activeRadioStation;
           retryAtMs = millis() + kRetryDelaysMs[retryCount++];
           Serial.printf("[RADIO] reconnect in %lu seconds\n",
                         (unsigned long)(kRetryDelaysMs[retryCount - 1] / 1000));
         }
       } else if (mp3Requested) {
-        char path[sizeof(mp3RequestedPath)] = {};
+        char path[kMp3PathSize] = {};
         if (mp3RequestMutex && xSemaphoreTake(mp3RequestMutex, portMAX_DELAY) == pdTRUE) {
-          strlcpy(path, mp3RequestedPath, sizeof(path));
+          if (repeatingMp3 && radioCommand.load() != -1) {
+            xSemaphoreGive(mp3RequestMutex);
+            continue;
+          }
+          if (mp3TrackCount) {
+            const int track = repeatingMp3 ?
+                (playingMp3Track + (repeatMode == Mp3Repeat::List ? 1 : 0)) % mp3TrackCount :
+                mp3RequestedTrack;
+            if (track >= 0 && track < mp3TrackCount) {
+              playingMp3Track = track;
+              if (repeatingMp3) mp3SelectedTrack.store(track);
+              strlcpy(path, mp3Tracks[track].c_str(), sizeof(path));
+            }
+          }
           xSemaphoreGive(mp3RequestMutex);
         }
         if (canStartRadio && deskFontSdMounted() && path[0]) {
@@ -988,7 +1074,7 @@ static void radioAudioTask(void *) {
           if (source && source->isOpen()) {
             output = new RadioI2SOutput();
             decoder = new AudioGeneratorMP3();
-            if (output && decoder && output->SetBuffers(8, 2304) &&
+            if (radioCommand.load() == -1 && output && decoder && output->SetBuffers(8, 2304) &&
                 output->SetPinout(15, 46, 45, 7) &&
                 decoder->begin(source, output) && output->codecConfigured()) {
               mp3Progress.store(0);
@@ -1022,7 +1108,6 @@ static void radioAudioTask(void *) {
           radioState.store(3);
           Serial.println("[RADIO] HTTP audio URL required");
         } else {
-          radioStation.store(command);
           if (!driverSwitched) {
             xSemaphoreTake(audioMutex, portMAX_DELAY);
             audioReady = false;
@@ -1125,17 +1210,29 @@ static void radioAudioTask(void *) {
       }
     }
     if (mp3State.load() == 2 && decoder && source) {
-      const uint32_t size = source->getSize();
-      if (size) mp3Progress.store((int)std::min((uint64_t)1000,
-                                                   (uint64_t)source->getPos() * 1000 / size));
+      const uint32_t now = millis();
+      if (now - lastMp3ProgressMs >= kMp3UiPeriodMs) {
+        lastMp3ProgressMs = now;
+        const uint32_t size = source->getSize();
+        if (size) mp3Progress.store((int)std::min((uint64_t)1000,
+                                                (uint64_t)source->getPos() * 1000 / size));
+      }
       if (appliedVolume != cfg.volume) {
         if (writeCodecVolume(cfg.volume)) appliedVolume = cfg.volume;
       }
       if (!decoder->isRunning() || !decoder->loop()) {
-        Serial.println("[MP3] playback ended");
+        const uint32_t size = source->getSize();
+        const bool reachedEnd = size && source->getPos() >= size && decoder->isRunning();
+        Serial.println(reachedEnd ? "[MP3] playback ended" : "[MP3] playback interrupted");
         closeStream();
-        restoreI2s();
-        mp3State.store(5);
+        if (reachedEnd) mp3Progress.store(1000);
+        if (reachedEnd && mp3Repeat.load() != Mp3Repeat::Off) {
+          mp3AtEof = true;
+          mp3State.store(1);
+        } else {
+          restoreI2s();
+          mp3State.store(reachedEnd ? 5 : 4);
+        }
       }
     }
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -1181,6 +1278,7 @@ static void goHome(lv_event_t *) {
 }
 static void goSettings(lv_event_t *) {
   lv_screen_load(settingsScreen); lastInputMs = millis(); Serial.println("[UI] settings");
+  if (!lv_obj_has_flag(settingsPages[kMp3SettingsPage], LV_OBJ_FLAG_HIDDEN)) requestMp3Scan();
 }
 
 static uint32_t stockChangeColor(const String &change) {
@@ -1218,6 +1316,21 @@ static void splitStockLine(const String &value, uint8_t index,
       change = value.substring(second + 2);
     }
   }
+}
+
+// Show queued selections without changing the audio task's active source.
+static int radioUiState() {
+  const int command = radioCommand.load();
+  if (command == 0 || command == kMp3PlayCommand) return 0;
+  if (command > 0 && command <= kRadioStations) return 1;
+  return radioState.load();
+}
+
+static int mp3UiState() {
+  const int command = radioCommand.load();
+  if (command == kMp3PlayCommand) return 1;
+  if (command >= 0) return 0;
+  return mp3State.load();
 }
 
 #include "home_ui.inc"
@@ -1283,7 +1396,7 @@ static void buildStockScreen() {
   lv_obj_clear_flag(stockScreen, LV_OBJ_FLAG_SCROLLABLE);
   button(stockScreen, LV_SYMBOL_LEFT, 15, 9, 44, 36, backFromStocks);
   label(stockScreen, "自選個股", 72, 13, 148, 20);
-  label(stockScreen, "收盤資料", 292, 15, 92);
+  label(stockScreen, "成交資料", 292, 15, 92);
   button(stockScreen, "編輯", 402, 9, 85, 36, editStock);
   stockPageLabel = label(stockScreen, "1 / 1", 510, 15, 48);
   button(stockScreen, LV_SYMBOL_LEFT, 558, 9, 31, 36, prevStocks);
@@ -1303,13 +1416,13 @@ static void buildStockScreen() {
     label(panel, "", 119, 38, 68);
     label(panel, "", 13, 70, 166);
   }
-  label(stockScreen, "證交所最新收盤資料 · 長按首頁股市可進入此頁", 18, 150, 580);
+  label(stockScreen, "證交所最新成交資料 · 長按首頁股市可進入此頁", 18, 150, 580);
   updateStockScreen();
 }
 
 static void updateRadioScreen() {
   if (!radioStatusLabel) return;
-  const int state = radioState.load();
+  const int state = radioUiState();
   const int station = radioStation.load();
   static int renderedState = -1, renderedStation = -1;
   if (state == renderedState && station == renderedStation) return;
@@ -1332,24 +1445,22 @@ static void selectRadio(lv_event_t *event) {
     editRadioUrl(nullptr);
     return;
   }
-  if (station == radioStation.load() && radioState.load() <= 2 &&
-      radioState.load() != 0) return;
+  const int state = radioUiState();
+  if (station == radioStation.load() && (state == 1 || state == 2)) return;
   radioStation.store(station);
   radioCommand.store(station);
-  radioState.store(1);
   updateRadioScreen();
   updateHomeRadio();
 }
 static void toggleRadio(lv_event_t *) {
-  if (radioState.load() == 1 || radioState.load() == 2) {
+  const int state = radioUiState();
+  if (state == 1 || state == 2) {
     radioCommand.store(0);
-    radioState.store(0);
   }
   else {
     const int station = radioStation.load() ? radioStation.load() : 1;
     radioStation.store(station);
     radioCommand.store(station);
-    radioState.store(1);
   }
   updateRadioScreen();
   updateHomeRadio();
@@ -1364,7 +1475,6 @@ static void stepRadio(lv_event_t *event) {
   if (station > kRadioStations) station = 1;
   radioStation.store(station);
   radioCommand.store(station);
-  radioState.store(1);
   updateRadioScreen();
   updateHomeRadio();
 }
@@ -1630,16 +1740,12 @@ static void wifiEntryClicked(lv_event_t *event) {
   }
 }
 
-static void wifiPriorityUp(lv_event_t *) {
-  const int index = findWifiProfile(selectedWifiSsid);
-  if (index <= 0) return;
-  WifiProfile saved = wifiProfiles[index - 1];
-  wifiProfiles[index - 1] = wifiProfiles[index];
-  wifiProfiles[index] = saved;
-  xSemaphoreTake(configMutex, portMAX_DELAY);
-  persistWifiProfiles();
-  xSemaphoreGive(configMutex);
-  wifiListDirty = true;
+static void wifiPageUp(lv_event_t *) {
+  lv_obj_scroll_by_bounded(wifiList, 0, 128, LV_ANIM_OFF);
+}
+
+static void wifiPageDown(lv_event_t *) {
+  lv_obj_scroll_by_bounded(wifiList, 0, -128, LV_ANIM_OFF);
 }
 
 static void wifiForget(lv_event_t *) {
@@ -1684,16 +1790,18 @@ static void rebuildWifiList() {
     const char *status = wifiEntries[i].saved ? "已記憶" : wifiEntries[i].secured ? "需密碼" : "開放";
     lv_obj_t *row = lv_button_create(wifiList);
     lv_obj_set_pos(row, 0, i * 32);
-    lv_obj_set_size(row, 600, 30);
+    lv_obj_set_size(row, 550, 30);
     lv_obj_set_style_pad_all(row, 0, 0);
     lv_obj_set_style_radius(row, 3, 0);
     lv_obj_set_style_shadow_width(row, 0, 0);
     lv_obj_set_style_bg_color(row, lv_color_hex(i % 2 ? 0x202824 : 0x141B18), 0);
-    label(row, ssid.c_str(), 9, 5, 470);
-    lv_obj_t *statusLabel = label(row, status, 505, 5, 84);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    label(row, ssid.c_str(), 9, 5, 432);
+    lv_obj_t *statusLabel = label(row, status, 453, 5, 84);
     lv_obj_set_style_text_align(statusLabel, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_add_event_cb(row, buttonCue, LV_EVENT_PRESSED, nullptr);
-    lv_obj_add_event_cb(row, wifiEntryClicked, LV_EVENT_PRESSED, (void *)(intptr_t)i);
+    // CLICKED is suppressed after a drag; PRESSED interrupts list scrolling.
+    lv_obj_add_event_cb(row, buttonCue, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(row, wifiEntryClicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
   }
   wifiListDirty = false;
 }
@@ -1737,6 +1845,13 @@ static void changeHomeCarouselInterval(lv_event_t *event) {
   lastWeatherFlip = lastFooterFlip = millis();
   deferSetting(3, next);
   lastInputMs = millis();
+}
+static void toggleHomeCarouselPause(lv_event_t *) {
+  cfg.carouselPaused = !cfg.carouselPaused;
+  homeSetText(lv_obj_get_child(carouselPauseButton, 0),
+              cfg.carouselPaused ? "恢復輪播" : "暫停輪播");
+  lastInputMs = lastWeatherFlip = lastFooterFlip = millis();
+  deferSetting(14, cfg.carouselPaused);
 }
 static void changeEq(lv_event_t *event) {
   const uint8_t action = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
@@ -1818,6 +1933,7 @@ static lv_obj_t *generalButton(lv_obj_t *parent, const char *text, int x, int y,
 
 static void openWifiSettings(lv_event_t *) {
   selectSettingsPage(1);
+  lv_obj_move_foreground(settingsPages[1]);
   lastInputMs = millis();
 }
 
@@ -1826,44 +1942,63 @@ static void returnGeneralSettings(lv_event_t *) {
   lastInputMs = millis();
 }
 
+static bool mp3PageVisible() {
+  return lv_screen_active() == settingsScreen &&
+         !lv_obj_has_flag(settingsPages[kMp3SettingsPage], LV_OBJ_FLAG_HIDDEN);
+}
+
 static void updateMp3Screen() {
-  if (!mp3TitleLabel) return;
-  const int state = mp3State.load();
+  Mp3Panel *panel = nullptr;
+  if (mp3PageVisible()) panel = &settingsMp3;
+  else if (lv_screen_active() == homeScreen && homeCarouselPage == kHomeMp3Page)
+    panel = &homeMp3;
+  if (!panel) return;
+  const auto setText = [panel](lv_obj_t *label, const char *text) {
+    if (strcmp(lv_label_get_text(label), text) == 0) return;
+    if (label == panel->title) {
+      lv_point_t size;
+      const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+      lv_text_get_size(&size, text, font, lv_obj_get_style_text_letter_space(label, LV_PART_MAIN),
+                       0, LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+      const uint32_t distance = size.x + lv_font_get_glyph_width(font, ' ', ' ') * LV_LABEL_WAIT_CHAR_COUNT;
+      // A fixed 30 px/s, including titles that take more than ten seconds to scroll.
+      lv_obj_set_style_anim_duration(label, (distance * 1000 + 15) / 30, LV_PART_MAIN);
+    }
+    lv_label_set_text(label, text);
+  };
+  const int state = mp3UiState();
   if (mp3ScanPending.load()) {
-    homeSetText(mp3StatusLabel, "搜尋中...");
+    setText(panel->status, "搜尋中...");
     return;
   }
   if (mp3TrackCount) {
-    const String &path = mp3Tracks[mp3SelectedTrack];
+    const int selected = mp3SelectedTrack.load();
+    const String &path = mp3Tracks[selected];
     const int slash = path.lastIndexOf('/');
-    homeSetText(mp3TitleLabel, path.c_str() + slash + 1);
+    setText(panel->title, path.c_str() + slash + 1);
     char countText[40];
-    snprintf(countText, sizeof(countText), "%d / %d 首", mp3SelectedTrack + 1, mp3TrackCount);
-    homeSetText(mp3CountLabel, countText);
+    snprintf(countText, sizeof(countText), "%d / %d 首", selected + 1, mp3TrackCount);
+    setText(panel->count, countText);
   } else {
-    homeSetText(mp3TitleLabel, mp3StorageStatus);
-    homeSetText(mp3CountLabel, "0 首");
+    setText(panel->title, mp3StorageStatus);
+    setText(panel->count, "0 首");
   }
   const char *status = state == 1 ? "開啟中" : state == 2 ? "播放中" :
                        state == 3 ? "已暫停" : state == 4 ? "開啟或解碼失敗" :
                        state == 5 ? "播放已結束" :
                        mp3TrackCount ? "已停止" : mp3StorageStatus;
-  homeSetText(mp3StatusLabel, status);
-  homeSetText(lv_obj_get_child(mp3PlayButton, 0),
-              state == 2 ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
-  lv_bar_set_value(mp3ProgressBar, mp3Progress.load(), LV_ANIM_OFF);
+  setText(panel->status, status);
+  setText(lv_obj_get_child(panel->play, 0), state == 2 ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+  lv_bar_set_value(panel->progress, mp3Progress.load() * kMp3ProgressWidth / 1000, LV_ANIM_OFF);
 }
 
-static void scanMp3(lv_event_t *) {
+static void requestMp3Scan() {
   const int state = mp3State.load();
-  if (mp3ScanPending.load()) return;
-  if (state == 1 || state == 2 || state == 3) {
-    homeSetText(mp3StatusLabel, "請先停止播放再掃描");
-    return;
-  }
+  if (mp3ScanPending.load() || !mp3RequestMutex || radioCommand.load() == kMp3PlayCommand) return;
+  if (state == 1 || state == 2 || state == 3) return;
   mp3ScanPending.store(true);
   mp3ScanRequested.store(true);
-  homeSetText(mp3StatusLabel, "搜尋中...");
+  updateMp3Screen();
   lastInputMs = millis();
 }
 
@@ -1882,7 +2017,7 @@ static void scanMp3InBackground() {
         if (!entry.isDirectory()) {
           String path = entry.path(), lower = path;
           lower.toLowerCase();
-          if (lower.endsWith(".mp3") && path.length() < sizeof(mp3RequestedPath))
+          if (lower.endsWith(".mp3") && path.length() < kMp3PathSize)
             tracks[count++] = path;
         }
         entry.close();
@@ -1904,10 +2039,12 @@ static void scanMp3InBackground() {
   if (lvgl_port_lock(-1)) {
     // Only a newly inserted card needs font registration, which uses LVGL APIs.
     if (deskFontSdMounted()) deskFontInitSd();
+    xSemaphoreTake(mp3RequestMutex, portMAX_DELAY);
     for (int i = 0; i < count; ++i) mp3Tracks[i] = std::move(tracks[i]);
     for (int i = count; i < mp3TrackCount; ++i) mp3Tracks[i] = "";
     mp3TrackCount = count;
-    mp3SelectedTrack = 0;
+    mp3SelectedTrack.store(0);
+    xSemaphoreGive(mp3RequestMutex);
     mp3StorageStatus = status;
     mp3Progress.store(0);
     mp3State.store(0);
@@ -1946,40 +2083,48 @@ static void settingsIoTask(void *) {
   }
 }
 
-static void playSelectedMp3() {
-  if (mp3ScanPending.load() || !mp3TrackCount || !mp3RequestMutex) return;
+static void playSelectedMp3(int track) {
+  if (mp3ScanPending.load() || track < 0 || track >= mp3TrackCount || !mp3RequestMutex) return;
   if (xSemaphoreTake(mp3RequestMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-  strlcpy(mp3RequestedPath, mp3Tracks[mp3SelectedTrack].c_str(), sizeof(mp3RequestedPath));
-  xSemaphoreGive(mp3RequestMutex);
+  mp3RequestedTrack = track;
+  mp3SelectedTrack.store(track);
   mp3Progress.store(0);
-  mp3State.store(1);
-  radioState.store(0);
   radioCommand.store(kMp3PlayCommand);
+  xSemaphoreGive(mp3RequestMutex);
   updateRadioScreen();
   updateHomeRadio();
   updateMp3Screen();
 }
 
 static void toggleMp3(lv_event_t *) {
-  const int state = mp3State.load();
-  if (state == 2) radioCommand.store(kMp3PauseCommand);
-  else if (state == 3) radioCommand.store(kMp3ResumeCommand);
-  else playSelectedMp3();
+  const int state = mp3UiState();
+  if (state == 2 || state == 3) {
+    int expected = -1;
+    radioCommand.compare_exchange_strong(expected, state == 2 ? kMp3PauseCommand : kMp3ResumeCommand);
+  } else if (state != 1) playSelectedMp3(mp3SelectedTrack.load());
   lastInputMs = millis();
 }
 
-static void stopMp3(lv_event_t *) {
-  const int state = mp3State.load();
-  if (state == 1 || state == 2 || state == 3) radioCommand.store(0);
+static void cycleMp3Repeat(lv_event_t *) {
+  const Mp3Repeat mode = mp3Repeat.load();
+  const Mp3Repeat next = mode == Mp3Repeat::Off ? Mp3Repeat::One :
+                         mode == Mp3Repeat::One ? Mp3Repeat::List : Mp3Repeat::Off;
+  mp3Repeat.store(next);
+  homeSetText(lv_obj_get_child(mp3RepeatButton, 0),
+              next == Mp3Repeat::One ? "單曲循環" : next == Mp3Repeat::List ? "清單循環" : "不循環");
+  Serial.printf("[MP3] repeat mode=%u\n", (unsigned)next);
   lastInputMs = millis();
 }
 
 static void stepMp3(int delta) {
   if (mp3ScanPending.load() || !mp3TrackCount) return;
-  mp3SelectedTrack = (mp3SelectedTrack + delta + mp3TrackCount) % mp3TrackCount;
-  const int state = mp3State.load();
-  if (state == 1 || state == 2 || state == 3) playSelectedMp3();
-  else updateMp3Screen();
+  const int track = (mp3SelectedTrack.load() + delta + mp3TrackCount) % mp3TrackCount;
+  const int state = mp3UiState();
+  if (state == 1 || state == 2 || state == 3) playSelectedMp3(track);
+  else {
+    mp3SelectedTrack.store(track);
+    updateMp3Screen();
+  }
   lastInputMs = millis();
 }
 
@@ -2010,7 +2155,7 @@ static void settingsNavClicked(lv_event_t *event) {
   const uint8_t index = navIndex == 0 ? 0 : navIndex + 1;
   const bool entering = lv_obj_has_flag(settingsPages[index], LV_OBJ_FLAG_HIDDEN);
   selectSettingsPage(index);
-  if (index == kMp3SettingsPage && entering) scanMp3(nullptr);
+  if (index == kMp3SettingsPage && entering) requestMp3Scan();
   lastInputMs = millis();
   pendingSettingsPageReport.store(index);
 }
@@ -2109,8 +2254,8 @@ static void buildSettings() {
   volumeValueLabel = generalLabel(generalCards[2], "", 100, 5, 90);
   lv_obj_set_style_text_align(volumeValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(volumeValueLabel, "%d%%", cfg.volume);
-  adjustButton(generalCards[2], "-", 9, 26, changeVolume, -1, 86, 27);
-  adjustButton(generalCards[2], "+", 105, 26, changeVolume, 1, 86, 27);
+  adjustButton(generalCards[2], "-", 9, 26, changeVolume, -5, 86, 27);
+  adjustButton(generalCards[2], "+", 105, 26, changeVolume, 5, 86, 27);
 
   generalLabel(generalCards[3], "日期與時間", 10, 5, 180);
   generalButton(generalCards[3], "設定時間", 9, 26, 86, 27, editDateTime);
@@ -2121,8 +2266,10 @@ static void buildSettings() {
   carouselValueLabel = generalLabel(generalCards[4], "", 100, 5, 90);
   lv_obj_set_style_text_align(carouselValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(carouselValueLabel, "%d 秒", cfg.carouselSeconds);
-  adjustButton(generalCards[4], "-", 9, 26, changeHomeCarouselInterval, -5, 86, 27);
-  adjustButton(generalCards[4], "+", 105, 26, changeHomeCarouselInterval, 5, 86, 27);
+  adjustButton(generalCards[4], "-", 9, 26, changeHomeCarouselInterval, -5, 42, 27);
+  carouselPauseButton = generalButton(generalCards[4], cfg.carouselPaused ? "恢復輪播" : "暫停輪播",
+                                      56, 26, 88, 27, toggleHomeCarouselPause);
+  adjustButton(generalCards[4], "+", 149, 26, changeHomeCarouselInterval, 5, 42, 27);
 
   generalLabel(generalCards[5], "系統與網路", 10, 5, 90);
   otaStatusLabel = generalLabel(generalCards[5], DESKDOCK_VERSION, 100, 5, 90);
@@ -2130,19 +2277,25 @@ static void buildSettings() {
   generalButton(generalCards[5], "Wi-Fi", 9, 26, 86, 27, openWifiSettings);
   otaButton = generalButton(generalCards[5], "檢查更新", 105, 26, 86, 27, otaButtonClicked);
 
-  button(network, "返回一般", 20, 2, 110, 26, returnGeneralSettings);
-  networkLabel = label(network, "未連線", 142, 5, 476);
-  button(network, "搜尋", 20, 31, 110, 30, scanWifi);
-  button(network, "優先", 142, 31, 110, 30, wifiPriorityUp);
-  button(network, "刪除", 264, 31, 110, 30, wifiForget);
-  button(network, "手動", 386, 31, 110, 30, editSsid);
-  button(network, "連線", 508, 31, 110, 30, connectWifi);
+  // Wi-Fi uses the full display so four touch-sized rows fit below one toolbar.
+  lv_obj_set_pos(network, 0, 0);
+  lv_obj_set_size(network, 640, 172);
+  networkLabel = label(network, "未連線", 12, 5, 170);
+  button(network, "搜尋", 188, 2, 78, 30, scanWifi);
+  button(network, "刪除", 272, 2, 78, 30, wifiForget);
+  button(network, "手動", 356, 2, 78, 30, editSsid);
+  button(network, "連線", 440, 2, 78, 30, connectWifi);
+  button(network, "返回一般", 532, 2, 90, 30, returnGeneralSettings);
   wifiList = lv_obj_create(network);
-  lv_obj_set_pos(wifiList, 20, 66);
-  lv_obj_set_size(wifiList, 600, 62);
+  lv_obj_set_pos(wifiList, 12, 38);
+  lv_obj_set_size(wifiList, 550, 128);
   lv_obj_set_style_pad_all(wifiList, 0, 0);
   lv_obj_set_style_border_width(wifiList, 0, 0);
   lv_obj_set_style_bg_opa(wifiList, LV_OPA_TRANSP, 0);
+  lv_obj_set_scroll_dir(wifiList, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(wifiList, LV_SCROLLBAR_MODE_AUTO);
+  button(network, LV_SYMBOL_UP, 574, 38, 48, 60, wifiPageUp);
+  button(network, LV_SYMBOL_DOWN, 574, 106, 48, 60, wifiPageDown);
   rebuildWifiList();
 
   String options;
@@ -2218,24 +2371,22 @@ static void buildSettings() {
   buildRadioSettings(radio);
 
   label(mp3Page, "SD 音樂  /music", 20, 9, 360);
-  mp3TitleLabel = label(mp3Page, "尚未掃描", 20, 36, 365);
-  lv_obj_set_style_text_font(mp3TitleLabel, &desk_font_16_bold, 0);
-  mp3StatusLabel = label(mp3Page, "尚未掃描", 20, 65, 365);
-  mp3CountLabel = label(mp3Page, "0 首", 20, 92, 116);
-  mp3ProgressBar = lv_bar_create(mp3Page);
-  lv_obj_set_pos(mp3ProgressBar, 143, 100);
-  lv_obj_set_size(mp3ProgressBar, 237, 8);
-  lv_bar_set_range(mp3ProgressBar, 0, 1000);
-  lv_bar_set_value(mp3ProgressBar, 0, LV_ANIM_OFF);
+  settingsMp3.title = label(mp3Page, "尚未掃描", 20, 36, 365);
+  lv_obj_set_style_text_font(settingsMp3.title, &desk_font_16_bold, 0);
+  lv_label_set_long_mode(settingsMp3.title, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+  lv_obj_set_height(settingsMp3.title, lv_font_get_line_height(&desk_font_16_bold));
+  settingsMp3.status = label(mp3Page, "尚未掃描", 20, 65, 365);
+  settingsMp3.count = label(mp3Page, "0 首", 20, 92, 116);
+  settingsMp3.progress = lv_bar_create(mp3Page);
+  lv_obj_set_pos(settingsMp3.progress, 143, 100);
+  lv_obj_set_size(settingsMp3.progress, kMp3ProgressWidth, 8);
+  lv_bar_set_range(settingsMp3.progress, 0, kMp3ProgressWidth);
+  lv_bar_set_value(settingsMp3.progress, 0, LV_ANIM_OFF);
   button(mp3Page, LV_SYMBOL_LEFT, 400, 15, 55, 42, previousMp3);
-  mp3PlayButton = button(mp3Page, LV_SYMBOL_PLAY, 463, 15, 80, 42, toggleMp3);
-  lv_timer_create([](lv_timer_t *) {
-    if (lv_screen_active() == settingsScreen && !lv_obj_has_flag(settingsPages[kMp3SettingsPage], LV_OBJ_FLAG_HIDDEN))
-      updateMp3Screen();
-  }, 20, nullptr);
+  settingsMp3.play = button(mp3Page, LV_SYMBOL_PLAY, 463, 15, 80, 42, toggleMp3);
+  lv_timer_create([](lv_timer_t *) { updateMp3Screen(); }, kMp3UiPeriodMs, nullptr);
   button(mp3Page, LV_SYMBOL_RIGHT, 551, 15, 55, 42, nextMp3);
-  button(mp3Page, "停止", 400, 73, 90, 35, stopMp3);
-  button(mp3Page, "重新掃描", 499, 73, 107, 35, scanMp3);
+  mp3RepeatButton = button(mp3Page, "不循環", 400, 73, 206, 35, cycleMp3Repeat);
 
   selectSettingsPage(0);
   button(settingsScreen, LV_SYMBOL_LEFT, 575, 5, 54, 34, goHome);
@@ -2281,7 +2432,7 @@ static void saveField(const String &value) {
       cfg.customRadioUrl = url;
       prefs.putString("radio_url", url);
       xSemaphoreGive(configMutex);
-      if (radioStation.load() == 3) radioCommand.store(0);
+      if (radioStation.load() == 3 && radioUiState() != 0) radioCommand.store(0);
       Serial.println("[RADIO] custom URL updated");
     } else Serial.println("[RADIO] rejected URL: HTTP MP3 required");
   } else {
@@ -2556,15 +2707,15 @@ struct IntradayQuote {
   StockDetail detail;
 };
 
-static bool fetchIntraday(const String *codes, uint8_t count, IntradayQuote *quotes) {
+static bool fetchIntraday(const String *codes, uint8_t count, IntradayQuote *quotes,
+                          IntradayQuote &index) {
   tm local;
   if (!getLocalTime(&local, 100) || local.tm_year < 124) return false;
   char today[9];
   strftime(today, sizeof(today), "%Y%m%d", &local);
-  String url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=";
+  String url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw";
   for (uint8_t i = 0; i < count; ++i) {
-    if (i) url += "%7C";
-    url += "tse_" + codes[i] + ".tw";
+    url += "%7Ctse_" + codes[i] + ".tw";
   }
   url += "&json=1&delay=0";
   String body;
@@ -2577,21 +2728,35 @@ static bool fetchIntraday(const String *codes, uint8_t count, IntradayQuote *quo
     const cJSON *row = cJSON_GetArrayItem(rows, rowIndex);
     const char *code = jsonString(row, "c");
     const char *date = jsonString(row, "d");
+    if (strcmp(date, today)) continue;
     const char *tradeTime = jsonString(row, "t");
     const char *priceText = jsonString(row, "z");
+    // A book update can omit the execution price while retaining the last trade.
+    if (!priceText[0] || priceText[0] == '-') {
+      const cJSON *trade = cJSON_GetObjectItemCaseSensitive(row, "trade");
+      priceText = jsonString(trade, "z");
+      tradeTime = jsonString(trade, "t");
+    }
     const char *previousText = jsonString(row, "y");
-    if (strcmp(date, today) || strlen(tradeTime) < 5 ||
-        !priceText[0] || priceText[0] == '-' || !previousText[0]) continue;
+    if (strlen(tradeTime) < 5) continue;
     const float price = strtof(priceText, nullptr);
     const float previous = strtof(previousText, nullptr);
     if (price <= 0 || previous <= 0) continue;
+    const String value = String(price, 2) + "  " +
+                         signedChange(String(price - previous, 2).c_str());
+    const String stamp = String(date + 4).substring(0, 2) + "/" + String(date + 6) +
+                         " " + String(tradeTime).substring(0, 5);
+    if (!strcmp(code, "t00")) {
+      index.value = value;
+      index.stamp = stamp;
+      index.valid = true;
+      continue;
+    }
     for (uint8_t i = 0; i < count; ++i) {
       if (codes[i] != code) continue;
       IntradayQuote &quote = quotes[i];
-      quote.value = codes[i] + "  " + String(price, 2) + "  " +
-                    signedChange(String(price - previous, 2).c_str());
-      quote.stamp = String(date + 4).substring(0, 2) + "/" + String(date + 6) +
-                    " " + String(tradeTime).substring(0, 5);
+      quote.value = codes[i] + "  " + value;
+      quote.stamp = stamp;
       quote.name = jsonString(row, "n");
       quote.detail.high = jsonString(row, "h");
       quote.detail.low = jsonString(row, "l");
@@ -2603,8 +2768,9 @@ static bool fetchIntraday(const String *codes, uint8_t count, IntradayQuote *quo
     }
   }
   cJSON_Delete(root);
-  Serial.printf("[STOCK] intraday %u/%u quotes at %s\n", validCount, count, today);
-  return validCount > 0;
+  Serial.printf("[STOCK] intraday %u/%u quotes at %s index=%s\n", validCount, count,
+                today, index.valid ? index.value.c_str() : "-");
+  return index.valid || validCount > 0;
 }
 
 static bool fetchIndex(RemoteData &remote) {
@@ -2762,8 +2928,13 @@ static void networkTask(void *) {
       for (uint8_t i = 0; i < count; ++i) codes[i] = stockCodes[i];
       lvgl_port_unlock();
       IntradayQuote quotes[kMaxStocks];
-      if (count && fetchIntraday(codes, count, quotes)) {
+      IntradayQuote index;
+      if (fetchIntraday(codes, count, quotes, index)) {
         while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
+        if (index.valid) {
+          remote.index = index.value;
+          remote.indexStamp = index.stamp;
+        }
         for (uint8_t i = 0; i < count; ++i) {
           if (!quotes[i].valid || i >= stockCount || stockCodes[i] != codes[i]) continue;
           stockValues[i] = quotes[i].value;
@@ -2816,8 +2987,15 @@ static void networkTask(void *) {
       count = stockCount;
       for (uint8_t i = 0; i < count; ++i) codes[i] = stockCodes[i];
       lvgl_port_unlock();
-      for (uint8_t i = 0; i < count && !intradayWindow() &&
-           WiFi.status() == WL_CONNECTED; ++i) {
+      const bool intraday = intradayWindow();
+      for (uint8_t i = 0; i < count && WiFi.status() == WL_CONNECTED; ++i) {
+        if (intraday) {
+          while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
+          const bool needsClose = i < stockCount && stockCodes[i] == codes[i] &&
+                                  stockStamps[i].isEmpty();
+          lvgl_port_unlock();
+          if (!needsClose) continue;
+        }
         String value, stamp, name;
         StockDetail detail;
         const bool valid = fetchStockOne(codes[i], value, stamp, name, detail);
@@ -2855,18 +3033,23 @@ static void networkTask(void *) {
       }
       if (WiFi.status() != WL_CONNECTED) continue;
       RemoteData result;
-      const bool indexValid = fetchIndex(result);
       while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
-      if (indexValid || remote.indexStamp.isEmpty()) {
-        remote.index = result.index;
-        remote.indexStamp = result.indexStamp;
-      }
+      const bool needsIndexClose = !intraday || remote.indexStamp.isEmpty();
       lvgl_port_unlock();
-      if (indexValid) {
-        xSemaphoreTake(configMutex, portMAX_DELAY);
-        prefs.putString("last_idx", result.index);
-        prefs.putString("last_idx_at", result.indexStamp);
-        xSemaphoreGive(configMutex);
+      if (needsIndexClose) {
+        const bool indexValid = fetchIndex(result);
+        while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
+        if (indexValid || remote.indexStamp.isEmpty()) {
+          remote.index = result.index;
+          remote.indexStamp = result.indexStamp;
+        }
+        lvgl_port_unlock();
+        if (indexValid) {
+          xSemaphoreTake(configMutex, portMAX_DELAY);
+          prefs.putString("last_idx", result.index);
+          prefs.putString("last_idx_at", result.indexStamp);
+          xSemaphoreGive(configMutex);
+        }
       }
       if (WiFi.status() != WL_CONNECTED) continue;
       const bool nightValid = fetchNight(result);
@@ -2892,58 +3075,34 @@ static void networkTask(void *) {
   }
 }
 
-static uint8_t aht30Crc(const uint8_t *data) {
-  uint8_t crc = 0xFF;
-  for (int i = 0; i < 6; ++i) {
-    crc ^= data[i];
-    for (int bit = 0; bit < 8; ++bit)
-      crc = crc & 0x80 ? (uint8_t)((crc << 1) ^ 0x31) : (uint8_t)(crc << 1);
-  }
-  return crc;
-}
-
-static void pollIndoorAht30(uint32_t now) {
-  if (!aht30_dev_handle) return;
-  if (!aht30Pending) {
-    if ((int32_t)(now - aht30NextAt) < 0) return;
-    aht30NextAt = now + 10000;
-    const uint8_t command[] = {0xAC, 0x33, 0x00};
-    if (i2c_master_transmit(aht30_dev_handle, command, sizeof(command), 30) == ESP_OK) {
-      aht30StartedAt = now;
-      aht30Pending = true;
-      return;
+static void refreshHomeOccasion(const tm *date) {
+  char text[32] = {};
+  const lv_image_dsc_t *icon = nullptr;
+  if (date) {
+    const int years = date->tm_year + 1900 - 2025;
+    if (date->tm_mon == 7 && date->tm_mday == 21 && years >= 1 && years <= 100) {
+      snprintf(text, sizeof(text), "認識阿喵喵%d周年~", years);
+      icon = &kHomeMapleLeaf;
+    } else if (date->tm_mon == 9 && date->tm_mday == 27) {
+      snprintf(text, sizeof(text), "阿喵喵生日快樂~");
+      icon = &kHomeBirthdayCake;
     }
-  } else {
-    if ((uint32_t)(now - aht30StartedAt) < 85) return;
-    uint8_t data[7];
-    if (i2c_master_receive(aht30_dev_handle, data, sizeof(data), 30) == ESP_OK) {
-      if ((data[0] & 0x80) && (uint32_t)(now - aht30StartedAt) < 250) return;
-      if (!(data[0] & 0x80) && (data[0] & 0x08) && aht30Crc(data) == data[6]) {
-        const uint32_t rh = ((uint32_t)data[1] << 12) | ((uint32_t)data[2] << 4) |
-                            (data[3] >> 4);
-        const uint32_t temp = ((uint32_t)(data[3] & 0x0F) << 16) |
-                              ((uint32_t)data[4] << 8) | data[5];
-        indoorHumidity = rh * (100.0f / 1048576.0f);
-        indoorTemperature = temp * (200.0f / 1048576.0f) - 50.0f;
-        if (indoorHumidity >= 0 && indoorHumidity <= 100 &&
-            indoorTemperature >= -40 && indoorTemperature <= 85) {
-          if (!indoorValid) Serial.println("[AHT30] indoor sensor ready");
-          indoorValid = true;
-          aht30Pending = false;
-          return;
-        }
-      }
-    }
-    aht30Pending = false;
   }
-  if (indoorValid) Serial.println("[AHT30] indoor sensor unavailable");
-  indoorValid = false;
+  homeSetText(occasionLabel, text);
+  if (icon && lv_image_get_src(occasionIcon) != icon) lv_image_set_src(occasionIcon, icon);
+  homeVisible(occasionIcon, icon != nullptr);
 }
 
 static void refreshUi() {
   tm t;
   const bool timeReady = getLocalTime(&t, 10) && t.tm_year >= 124;
   if (!lvgl_port_lock(100)) return;
+  if (mp3PageVisible()) {
+    // Leave hidden weather/stock/Wi-Fi widgets for the next regular UI refresh.
+    refreshOtaUi();
+    lvgl_port_unlock();
+    return;
+  }
   char clockText[12] = "--:--", dateText[40] = "---- / -- / --";
   const char *period = "";
   if (timeReady) {
@@ -2956,6 +3115,7 @@ static void refreshUi() {
   homeSetText(clockLabel, clockText);
   homeSetText(clockPeriodLabel, period);
   homeSetText(dateLabel, dateText);
+  setHomeDogTime(timeReady ? t.tm_hour * 60 + t.tm_min : -1);
   char status[28];
   if (batteryPresent()) {
     const int centivolts = (batteryMv + 5) / 10;
@@ -2965,6 +3125,7 @@ static void refreshUi() {
     snprintf(status, sizeof(status), "Wi-Fi");
   }
   homeSetText(wifiLabel, status);
+  refreshHomeOccasion(timeReady ? &t : nullptr);
   static bool wifiColorReady = false, wifiColorConnected = false;
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
   if (!wifiColorReady || wifiConnected != wifiColorConnected) {
@@ -2998,7 +3159,6 @@ static void refreshUi() {
   if (lv_screen_active() == stockScreen) updateStockScreen();
   if (lv_screen_active() == settingsScreen) {
     updateRadioScreen();
-    updateMp3Screen();
   }
   refreshOtaUi();
   lvgl_port_unlock();
@@ -3105,7 +3265,6 @@ void loop() {
   audioTick();
   collectWifiScan();
   maintainWifi(now);
-  pollIndoorAht30(now);
   if (ntpSynced.exchange(false)) {
     tm t; if (getLocalTime(&t, 100)) rtcWrite(t);
     networkRefresh = true;

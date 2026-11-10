@@ -92,7 +92,7 @@ lv_font_t desk_font_34 = makeFont(&desk_blob_34, 42, 6, &desk_font_16);
 lv_font_t desk_font_58 = makeFont(&desk_blob_58, 68, 8, &desk_font_16);
 lv_font_t desk_font_70 = makeFont(&desk_blob_70, 80, 8, &lv_font_montserrat_14);
 lv_font_t desk_font_86 = makeFont(&desk_blob_86, 98, 10, &lv_font_montserrat_14);
-lv_font_t desk_font_93 = makeFont(&desk_blob_93, 105, 10, &lv_font_montserrat_14);
+lv_font_t desk_font_88 = makeFont(&desk_blob_88, 99, 9, &lv_font_montserrat_14);
 
 static bool sdMounted = false;
 static lv_fs_drv_t sdFontFs;
