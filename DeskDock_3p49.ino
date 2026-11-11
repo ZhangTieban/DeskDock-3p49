@@ -32,7 +32,6 @@
 #include "src/lcd_bl_bsp/lcd_bl_pwm_bsp.h"
 #include "es8311.h"
 #include "desk_font.h"
-#include "radio_eq.h"
 #include "ota_config.h"
 
 // The panel and touch driver come from the supplied Waveshare 3.49 example.
@@ -99,7 +98,6 @@ struct Config {
   int brightness = 75;
   int sleepMinutes = 10;
   int volume = 40;
-  int eqDb[3] = {0, 0, 0};
   int weatherMain = 0, weatherDetail = 1, weatherThird = 4;
   int carouselSeconds = 10;
   bool carouselPaused = false;
@@ -136,8 +134,7 @@ struct PendingSetting {
 };
 static PendingSetting pendingSettings[] = {
   {"bright_ui_v2", 0, false}, {"sleep", 0, false}, {"volume", 0, false},
-  {"home_rotate", 0, false}, {"eq_b", 0, false}, {"eq_m", 0, false},
-  {"eq_t", 0, false}, {"county", 0, false}, {"county1", 0, false},
+  {"home_rotate", 0, false}, {"county", 0, false}, {"county1", 0, false},
   {"county2", 0, false}, {"wx_main", 0, false}, {"wx_detail", 0, false},
   {"wx_third", 0, false}, {"hour12", 0, true}, {"rotate_pause", 0, true}
 };
@@ -172,7 +169,6 @@ static std::atomic<int> mp3SelectedTrack{0};
 static const char *mp3StorageStatus = "尚未掃描";
 static std::atomic<bool> mp3ScanPending{false}, mp3ScanRequested{false};
 
-static std::atomic<int> eqGain[3];
 static TaskHandle_t radioTaskHandle = nullptr;
 static TaskHandle_t networkTaskHandle = nullptr;
 static constexpr uint32_t kFetchWeather = 1;
@@ -272,10 +268,10 @@ extern "C" void desk_touch_report(int x, int y) {
 }
 static lv_obj_t *homeScreen, *settingsScreen, *editorScreen, *stockScreen;
 static lv_obj_t *stockReturnScreen;
-static constexpr uint8_t kSettingsPages = 7;
+static constexpr uint8_t kSettingsPages = 6;
 static constexpr uint8_t kSettingsNavCount = kSettingsPages - 1;
-static constexpr uint8_t kRadioSettingsPage = 5;
-static constexpr uint8_t kMp3SettingsPage = 6;
+static constexpr uint8_t kRadioSettingsPage = 4;
+static constexpr uint8_t kMp3SettingsPage = 5;
 static lv_obj_t *settingsPages[kSettingsPages], *settingsNavButtons[kSettingsNavCount];
 static lv_obj_t *settingsNavIndicators[kSettingsNavCount];
 struct Mp3Panel {
@@ -303,7 +299,6 @@ static lv_obj_t *homeRadioStation, *homeRadioStatus, *homeRadioToggle;
 static lv_obj_t *networkLabel, *wifiList, *weatherPreviewLabels[kWeatherSlots], *stockCodesLabel;
 static lv_obj_t *stockPreviewLabel, *hourModeButton;
 static lv_obj_t *otaButton, *otaStatusLabel;
-static lv_obj_t *eqValueLabels[3];
 static void otaButtonClicked(lv_event_t *);
 static void refreshOtaUi();
 static void otaCheckFirstBoot();
@@ -422,11 +417,6 @@ static void loadConfig() {
                    constrain(((oldBrightness - 15) * 100 + 42) / 85, 0, 100);
   cfg.sleepMinutes = constrain(prefs.getInt("sleep", 10), 0, 60);
   cfg.volume = constrain(prefs.getInt("volume", 40), 0, 100);
-  static const char *eqKeys[3] = {"eq_b", "eq_m", "eq_t"};
-  for (int i = 0; i < 3; ++i) {
-    cfg.eqDb[i] = constrain(prefs.getInt(eqKeys[i], 0), -6, 6);
-    eqGain[i].store(cfg.eqDb[i]);
-  }
   cfg.hour12 = prefs.getBool("hour12", false);
   cfg.weatherMain = constrain(prefs.getInt("wx_main", 0), 0, kWeatherMetrics - 1);
   cfg.weatherDetail = constrain(prefs.getInt("wx_detail", 1), 0, kWeatherMetrics - 1);
@@ -857,18 +847,8 @@ class RadioI2SOutput : public AudioOutputI2S {
       return false;
     }
     codecRate = hz;
-    updateEq(true);
     Serial.printf("[RADIO] sample rate: %d Hz\n", hz);
     return true;
-  }
-  bool ConsumeSample(int16_t sample[2]) override {
-    if (--eqCheck == 0) {
-      eqCheck = 256;
-      updateEq(false);
-    }
-    int16_t filtered[2] = {sample[0], sample[1]};
-    eq.process(filtered);
-    return AudioOutputI2S::ConsumeSample(filtered);
   }
   bool codecConfigured() const { return codecRate > 0; }
 
@@ -896,19 +876,7 @@ class RadioI2SOutput : public AudioOutputI2S {
 
  private:
   bool txPaused = false;
-  void updateEq(bool force) {
-    const int bass = eqGain[0].load(std::memory_order_relaxed);
-    const int mid = eqGain[1].load(std::memory_order_relaxed);
-    const int treble = eqGain[2].load(std::memory_order_relaxed);
-    if (!force && bass == appliedEq[0] && mid == appliedEq[1] &&
-        treble == appliedEq[2]) return;
-    eq.configure(codecRate, bass, mid, treble);
-    appliedEq[0] = bass; appliedEq[1] = mid; appliedEq[2] = treble;
-  }
   int codecRate = 0;
-  uint16_t eqCheck = 256;
-  int appliedEq[3] = {0, 0, 0};
-  RadioEq eq;
 };
 
 class RadioAACDecoder : public AudioGeneratorAAC {
@@ -1851,34 +1819,7 @@ static void toggleHomeCarouselPause(lv_event_t *) {
   homeSetText(lv_obj_get_child(carouselPauseButton, 0),
               cfg.carouselPaused ? "恢復輪播" : "暫停輪播");
   lastInputMs = lastWeatherFlip = lastFooterFlip = millis();
-  deferSetting(14, cfg.carouselPaused);
-}
-static void changeEq(lv_event_t *event) {
-  const uint8_t action = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
-  const uint8_t band = action / 2;
-  if (band >= 3) return;
-  const int next = constrain(cfg.eqDb[band] + (action % 2 ? 1 : -1), -6, 6);
-  if (next == cfg.eqDb[band]) return;
-  cfg.eqDb[band] = next;
-  eqGain[band].store(next, std::memory_order_relaxed);
-  lv_label_set_text_fmt(eqValueLabels[band], "%+d dB", next);
-  deferSetting(4 + band, next);
-  lastInputMs = millis();
-}
-static void resetEq(lv_event_t *) {
-  for (int band = 0; band < 3; ++band) {
-    cfg.eqDb[band] = 0;
-    eqGain[band].store(0, std::memory_order_relaxed);
-    deferSetting(4 + band, 0);
-    lv_label_set_text(eqValueLabels[band], "+0 dB");
-  }
-  lastInputMs = millis();
-}
-static void eqAdjustButton(lv_obj_t *parent, const char *text, int x, int y,
-                           uint8_t band, bool increase) {
-  lv_obj_t *control = button(parent, text, x, y, 44, 34, noAction);
-  const uintptr_t action = band * 2 + (increase ? 1 : 0);
-  lv_obj_add_event_cb(control, changeEq, LV_EVENT_PRESSED, (void *)action);
+  deferSetting(11, cfg.carouselPaused);
 }
 static void changeCounty(lv_event_t *event) {
   const uint8_t slot = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
@@ -1888,7 +1829,7 @@ static void changeCounty(lv_event_t *event) {
   weatherData[slot].summary = "更新中...";
   weatherSlot = slot;
   lastWeatherFlip = millis();
-  deferSetting(7 + slot, cfg.counties[slot]);
+  deferSetting(4 + slot, cfg.counties[slot]);
   lastWeatherAttempt = millis();
   if (networkTaskHandle) xTaskNotify(networkTaskHandle, kFetchWeather, eSetBits);
   lastInputMs = millis();
@@ -1899,13 +1840,13 @@ static void changeWeatherDisplay(lv_event_t *event) {
   if (field == 0) cfg.weatherMain = selected;
   else if (field == 1) cfg.weatherDetail = selected;
   else cfg.weatherThird = selected;
-  deferSetting(10 + field, selected);
+  deferSetting(7 + field, selected);
   if (networkTaskHandle) xTaskNotify(networkTaskHandle, kFetchWeather, eSetBits);
   lastInputMs = millis();
 }
 static void changeHourMode(lv_event_t *) {
   cfg.hour12 = !cfg.hour12;
-  deferSetting(13, cfg.hour12);
+  deferSetting(10, cfg.hour12);
   lv_label_set_text(lv_obj_get_child(hourModeButton, 0), cfg.hour12 ? "12 小時" : "24 小時");
   lastInputMs = millis();
 }
@@ -2182,7 +2123,7 @@ static void buildSettings() {
   lv_obj_set_style_text_font(settingsScreen, &desk_font_16, 0);
   lv_obj_clear_flag(settingsScreen, LV_OBJ_FLAG_SCROLLABLE);
   label(settingsScreen, "設定", 18, 12, 60);
-  const char *names[] = {"一般", "天氣", "股票", "音效", "網路電台", "MP3"};
+  const char *names[] = {"一般", "天氣", "股票", "網路電台", "MP3"};
   for (uint8_t i = 0; i < kSettingsPages; ++i) {
     settingsPages[i] = lv_obj_create(settingsScreen);
     lv_obj_set_pos(settingsPages[i], 0, 44);
@@ -2195,8 +2136,8 @@ static void buildSettings() {
   for (uint8_t i = 0; i < kSettingsNavCount; ++i) {
     lv_obj_t *nav = lv_button_create(settingsScreen);
     settingsNavButtons[i] = nav;
-    lv_obj_set_pos(nav, 82 + i * 80, 5);
-    lv_obj_set_size(nav, 76, 34);
+    lv_obj_set_pos(nav, 82 + i * 96, 5);
+    lv_obj_set_size(nav, 92, 34);
     lv_obj_set_style_pad_all(nav, 0, 0);
     lv_obj_set_style_radius(nav, 4, 0);
     lv_obj_set_style_shadow_width(nav, 0, 0);
@@ -2204,13 +2145,13 @@ static void buildSettings() {
     lv_obj_set_style_bg_color(nav, lv_color_hex(0x121916), 0);
     lv_obj_add_event_cb(nav, buttonCue, LV_EVENT_PRESSED, nullptr);
     lv_obj_add_event_cb(nav, settingsNavClicked, LV_EVENT_PRESSED, (void *)(uintptr_t)i);
-    lv_obj_t *navLabel = label(nav, names[i], 0, 0, 68);
+    lv_obj_t *navLabel = label(nav, names[i], 0, 0, 84);
     lv_obj_set_style_text_align(navLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(navLabel, lv_color_hex(0xB3BDB7), 0);
     lv_obj_center(navLabel);
     lv_obj_t *indicator = lv_obj_create(nav);
     settingsNavIndicators[i] = indicator;
-    lv_obj_set_pos(indicator, 0, 31); lv_obj_set_size(indicator, 76, 3);
+    lv_obj_set_pos(indicator, 0, 31); lv_obj_set_size(indicator, 92, 3);
     lv_obj_set_style_pad_all(indicator, 0, 0);
     lv_obj_set_style_border_width(indicator, 0, 0);
     lv_obj_set_style_bg_color(indicator, lv_color_hex(0x83D7BB), 0);
@@ -2220,8 +2161,7 @@ static void buildSettings() {
   lv_obj_t *network = settingsPages[1];
   lv_obj_t *weather = settingsPages[2];
   lv_obj_t *stocks = settingsPages[3];
-  lv_obj_t *audio = settingsPages[4];
-  lv_obj_t *radio = settingsPages[5];
+  lv_obj_t *radio = settingsPages[kRadioSettingsPage];
   lv_obj_t *mp3Page = settingsPages[kMp3SettingsPage];
   lv_obj_t *generalCards[6];
   for (int i = 0; i < 6; ++i) {
@@ -2352,21 +2292,6 @@ static void buildSettings() {
   lv_obj_set_style_border_width(stockCard, 0, 0);
   lv_obj_clear_flag(stockCard, LV_OBJ_FLAG_SCROLLABLE);
   stockPreviewLabel = label(stockCard, remote.index.c_str(), 12, 4, 580);
-
-  static const char *eqNames[3] = {"低音", "人聲", "高音"};
-  static const char *eqFrequencies[3] = {"120 Hz", "1 kHz", "6 kHz"};
-  for (uint8_t band = 0; band < 3; ++band) {
-    const int y = 5 + band * 40;
-    label(audio, eqNames[band], 20, y + 7, 70);
-    eqAdjustButton(audio, "-", 103, y, band, false);
-    eqValueLabels[band] = label(audio, "", 157, y + 4, 80, 20);
-    lv_obj_set_style_text_align(eqValueLabels[band], LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(eqValueLabels[band], "%+d dB", cfg.eqDb[band]);
-    eqAdjustButton(audio, "+", 247, y, band, true);
-    label(audio, eqFrequencies[band], 325, y + 7, 110);
-  }
-  label(audio, "網路電台三段等化器", 447, 8, 180);
-  button(audio, "恢復平坦", 470, 48, 143, 42, resetEq);
 
   buildRadioSettings(radio);
 
