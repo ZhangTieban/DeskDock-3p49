@@ -1,0 +1,123 @@
+{
+  "width": 48,
+  "height": 36,
+  "default": "unknown.png",
+  "codes": {
+    "0": {
+      "day": "clear-day.png",
+      "night": "clear-night.png"
+    },
+    "1": {
+      "day": "partial-day.png",
+      "night": "partial-night.png"
+    },
+    "2": {
+      "day": "partial-day.png",
+      "night": "partial-night.png"
+    },
+    "3": {
+      "day": "cloudy.png",
+      "night": "cloudy.png"
+    },
+    "45": {
+      "day": "fog.png",
+      "night": "fog.png"
+    },
+    "48": {
+      "day": "fog.png",
+      "night": "fog.png"
+    },
+    "51": {
+      "day": "drizzle-day.png",
+      "night": "drizzle-night.png"
+    },
+    "53": {
+      "day": "drizzle-day.png",
+      "night": "drizzle-night.png"
+    },
+    "55": {
+      "day": "drizzle-day.png",
+      "night": "drizzle-night.png"
+    },
+    "56": {
+      "day": "freezing-day.png",
+      "night": "freezing-night.png"
+    },
+    "57": {
+      "day": "freezing-day.png",
+      "night": "freezing-night.png"
+    },
+    "66": {
+      "day": "freezing-day.png",
+      "night": "freezing-night.png"
+    },
+    "67": {
+      "day": "freezing-day.png",
+      "night": "freezing-night.png"
+    },
+    "61": {
+      "day": "rain-day.png",
+      "night": "rain-night.png"
+    },
+    "63": {
+      "day": "rain-day.png",
+      "night": "rain-night.png"
+    },
+    "65": {
+      "day": "rain-day.png",
+      "night": "rain-night.png"
+    },
+    "80": {
+      "day": "rain-day.png",
+      "night": "rain-night.png"
+    },
+    "81": {
+      "day": "rain-day.png",
+      "night": "rain-night.png"
+    },
+    "82": {
+      "day": "rain-day.png",
+      "night": "rain-night.png"
+    },
+    "71": {
+      "day": "snow-day.png",
+      "night": "snow-night.png"
+    },
+    "73": {
+      "day": "snow-day.png",
+      "night": "snow-night.png"
+    },
+    "75": {
+      "day": "snow-day.png",
+      "night": "snow-night.png"
+    },
+    "77": {
+      "day": "snow-day.png",
+      "night": "snow-night.png"
+    },
+    "85": {
+      "day": "snow-day.png",
+      "night": "snow-night.png"
+    },
+    "86": {
+      "day": "snow-day.png",
+      "night": "snow-night.png"
+    },
+    "95": {
+      "day": "thunder-day.png",
+      "night": "thunder-night.png"
+    },
+    "97": {
+      "day": "thunder-day.png",
+      "night": "thunder-night.png"
+    },
+    "96": {
+      "day": "hail-day.png",
+      "night": "hail-night.png"
+    },
+    "99": {
+      "day": "hail-day.png",
+      "night": "hail-night.png"
+    }
+  }
+}

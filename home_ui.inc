@@ -7,6 +7,8 @@ static constexpr int kHomeStockH = 104;
 static constexpr int kHomeTabHeight = 172 / kHomeCarouselCount;
 static constexpr uint32_t kHomeBackground = 0x070B0A;
 
+#include "weather_icons.inc"
+
 // 16 x 16 icons with four-color palettes. Palette entry zero is transparent.
 alignas(4) static const uint8_t kHomeMapleLeafPixels[] = {
   0x00, 0x00, 0x00, 0x00, 0x47, 0x78, 0xF3, 0xFF, 0x32, 0x4B, 0xD9, 0xFF, 0x37, 0x56, 0xAB, 0xFF,  // BGRA palette
@@ -296,24 +298,12 @@ static void swipeHomeCarousel(lv_event_t *) {
 }
 
 static void updateHomeWeatherIcon() {
-  static int renderedCode = -999;
-  static int renderedDay = -1;
+  static const lv_image_dsc_t *rendered = nullptr;
   const WeatherData &item = weatherData[weatherSlot];
-  const int code = item.valid ? item.code : -1;
-  const int day = item.day ? 1 : 0;
-  if (renderedCode == code && renderedDay == day) return;
-  renderedCode = code; renderedDay = day;
-  const uint32_t cloudColor = day ? 0x55A9E8 : 0x91A8D4;
-  for (uint32_t i = 0; i < lv_obj_get_child_count(weatherCloud); ++i)
-    lv_obj_set_style_bg_color(lv_obj_get_child(weatherCloud, i),
-                              lv_color_hex(cloudColor), 0);
-  const bool wet = code >= 51;
-  const bool partial = code == 1 || code == 2;
-  const bool sky = code == 0 || partial;
-  homeVisible(weatherSun, sky && day);
-  homeVisible(weatherMoon, sky && !day);
-  homeVisible(weatherCloud, code < 0 || partial || code == 3 || code == 45 || code == 48);
-  homeVisible(weatherRainIcon, wet);
+  const lv_image_dsc_t *image = weatherIconImage(item.valid ? item.code : -1, item.day);
+  if (image == rendered) return;
+  rendered = image;
+  lv_image_set_src(homeWeatherIcon, image);
 }
 
 static void updateHomeRadio() {
@@ -389,17 +379,6 @@ static lv_obj_t *homeControl(lv_obj_t *parent, const char *icon, const char *cap
   lv_obj_set_style_text_font(name, &desk_font_10_bold, 0);
   lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
   return control;
-}
-
-static void homeCloudPart(lv_obj_t *parent, int x, int y, int w, int h) {
-  lv_obj_t *part = lv_obj_create(parent);
-  lv_obj_set_pos(part, x, y); lv_obj_set_size(part, w, h);
-  lv_obj_set_style_pad_all(part, 0, 0);
-  lv_obj_set_style_radius(part, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(part, lv_color_hex(0x55A9E8), 0);
-  lv_obj_set_style_border_width(part, 0, 0);
-  lv_obj_remove_flag(part, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_clear_flag(part, LV_OBJ_FLAG_SCROLLABLE);
 }
 
 #include "home_dog.inc"
@@ -501,25 +480,9 @@ static void buildHome() {
   lv_obj_set_style_border_color(weatherCard, lv_color_hex(0x83D7BB), 0);
   lv_obj_clear_flag(weatherCard, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_remove_flag(weatherCard, LV_OBJ_FLAG_CLICKABLE);
-  weatherSun = label(homeWeatherPane, "☀", 5, 45, 32);
-  lv_obj_set_style_text_font(weatherSun, &desk_font_24_weather, 0);
-  lv_obj_set_style_text_color(weatherSun, lv_color_hex(0xF5C978), 0);
-  weatherMoon = label(homeWeatherPane, "☾", 5, 45, 32);
-  lv_obj_set_style_text_font(weatherMoon, &desk_font_24_moon, 0);
-  lv_obj_set_style_text_color(weatherMoon, lv_color_hex(0xF5D899), 0);
-  weatherCloud = lv_obj_create(homeWeatherPane);
-  lv_obj_set_pos(weatherCloud, 0, 43); lv_obj_set_size(weatherCloud, 55, 40);
-  lv_obj_set_style_pad_all(weatherCloud, 0, 0);
-  lv_obj_set_style_bg_opa(weatherCloud, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(weatherCloud, 0, 0);
-  lv_obj_remove_flag(weatherCloud, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_clear_flag(weatherCloud, LV_OBJ_FLAG_SCROLLABLE);
-  homeCloudPart(weatherCloud, 13, 23, 37, 14);
-  homeCloudPart(weatherCloud, 19, 13, 20, 20);
-  homeCloudPart(weatherCloud, 34, 19, 13, 13);
-  weatherRainIcon = label(homeWeatherPane, "☂", 8, 46, 32);
-  lv_obj_set_style_text_font(weatherRainIcon, &desk_font_24_weather, 0);
-  lv_obj_set_style_text_color(weatherRainIcon, lv_color_hex(0x83D7BB), 0);
+  homeWeatherIcon = lv_image_create(homeWeatherPane);
+  lv_obj_set_pos(homeWeatherIcon, 4, 44);
+  lv_obj_remove_flag(homeWeatherIcon, LV_OBJ_FLAG_CLICKABLE);
   homeRule(homeWeatherPane, 0, 83, kHomeContentW, 1);
   homeRule(homeWeatherPane, 143, 87, 1, 73);
   weatherPageA = makeWeatherPage(homeWeatherPane);
