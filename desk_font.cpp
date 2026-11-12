@@ -2,6 +2,7 @@
 #include <SD_MMC.h>
 #include <new>
 #include <cstring>
+#include "sd_access.h"
 
 struct DeskGlyph {
   uint32_t codepoint, offset;
@@ -101,6 +102,7 @@ static bool sdFontReady(lv_fs_drv_t *) { return sdMounted; }
 
 static void *sdFontOpen(lv_fs_drv_t *, const char *path, lv_fs_mode_t mode) {
   if (mode != LV_FS_MODE_RD) return nullptr;
+  DeskSdLock lock;
   File *file = new (std::nothrow) File(SD_MMC.open(path, FILE_READ));
   if (!file) return nullptr;
   if (!*file) { delete file; return nullptr; }
@@ -108,6 +110,7 @@ static void *sdFontOpen(lv_fs_drv_t *, const char *path, lv_fs_mode_t mode) {
 }
 
 static lv_fs_res_t sdFontClose(lv_fs_drv_t *, void *handle) {
+  DeskSdLock lock;
   File *file = static_cast<File *>(handle);
   file->close();
   delete file;
@@ -116,12 +119,14 @@ static lv_fs_res_t sdFontClose(lv_fs_drv_t *, void *handle) {
 
 static lv_fs_res_t sdFontRead(lv_fs_drv_t *, void *handle, void *buffer,
                               uint32_t count, uint32_t *readCount) {
+  DeskSdLock lock;
   *readCount = static_cast<File *>(handle)->read(static_cast<uint8_t *>(buffer), count);
   return LV_FS_RES_OK;
 }
 
 static lv_fs_res_t sdFontSeek(lv_fs_drv_t *, void *handle, uint32_t offset,
                               lv_fs_whence_t whence) {
+  DeskSdLock lock;
   File *file = static_cast<File *>(handle);
   SeekMode mode = whence == LV_FS_SEEK_CUR ? SeekCur :
                   whence == LV_FS_SEEK_END ? SeekEnd : SeekSet;
@@ -129,6 +134,7 @@ static lv_fs_res_t sdFontSeek(lv_fs_drv_t *, void *handle, uint32_t offset,
 }
 
 static lv_fs_res_t sdFontTell(lv_fs_drv_t *, void *handle, uint32_t *position) {
+  DeskSdLock lock;
   *position = static_cast<File *>(handle)->position();
   return LV_FS_RES_OK;
 }
@@ -138,7 +144,7 @@ bool deskFontSdMounted() { return sdMounted; }
 bool deskFontMountSd() {
   if (sdMounted) return true;
   if (!SD_MMC.setPins(41, 39, 40) ||
-      !SD_MMC.begin("/sdcard", true, false, BOARD_MAX_SDMMC_FREQ, 20)) {
+      !SD_MMC.begin("/sdcard", true, false, BOARD_MAX_SDMMC_FREQ, 40)) {
     Serial.println("[FONT] SD unavailable; using built-in glyphs");
     return false;
   }
@@ -159,7 +165,7 @@ void deskFontInitSd() {
   fontsRegistered = true;
   lv_fs_drv_init(&sdFontFs);
   sdFontFs.letter = 'S';
-  sdFontFs.cache_size = 1024;
+  sdFontFs.cache_size = 2048;
   sdFontFs.ready_cb = sdFontReady;
   sdFontFs.open_cb = sdFontOpen;
   sdFontFs.close_cb = sdFontClose;
@@ -180,15 +186,23 @@ void deskFontInitSd() {
   };
   unsigned loaded = 0;
   for (const FontFile &entry : files) {
-    if (!SD_MMC.exists(entry.path)) continue;
-    String lvPath = String("S:") + entry.path;
-    lv_font_t *sdFont = lv_tiny_ttf_create_file_ex(
-        lvPath.c_str(), entry.size, LV_FONT_KERNING_NONE, 16);
-    if (!sdFont) continue;
-    sdFont->fallback = entry.font->fallback;
-    entry.font->fallback = sdFont;
-    ++loaded;
+    const lv_font_t *oldFallback = entry.font->fallback;
+    lv_font_t *tail = entry.font;
+    const char *paths[] = {entry.path, "/fonts/Jigmo.ttf", "/fonts/Jigmo2.ttf", "/fonts/Jigmo3.ttf"};
+    for (unsigned i = 0; i < 4; ++i) {
+      bool exists;
+      { DeskSdLock lock; exists = SD_MMC.exists(paths[i]); }
+      if (!exists) continue;
+      String lvPath = String("S:") + paths[i];
+      lv_font_t *sdFont = lv_tiny_ttf_create_file_ex(
+          lvPath.c_str(), entry.size, LV_FONT_KERNING_NONE, i ? 8 : 64);
+      if (!sdFont) continue;
+      tail->fallback = sdFont;
+      tail = sdFont;
+      ++loaded;
+    }
+    tail->fallback = oldFallback;
   }
   Serial.printf("[FONT] SD mounted, %u/%u font fallbacks ready in %u ms\n", loaded,
-                (unsigned)(sizeof(files) / sizeof(files[0])), (unsigned)(millis() - startedAt));
+                (unsigned)(4 * sizeof(files) / sizeof(files[0])), (unsigned)(millis() - startedAt));
 }

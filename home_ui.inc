@@ -390,15 +390,15 @@ static void buildHome() {
   lv_obj_clear_flag(homeScreen, LV_OBJ_FLAG_SCROLLABLE);
   homeRule(homeScreen, 307, 8, 1, 156);
 
-  clockLabel = label(homeScreen, "--:--", 8, 8, 298, 88);
+  clockLabel = label(homeScreen, "--:--", 8, -2, 298, 88);
   lv_obj_set_style_text_font(clockLabel, &desk_font_88, 0);
   lv_obj_set_style_text_align(clockLabel, LV_TEXT_ALIGN_CENTER, 0);
-  dateLabel = label(homeScreen, "", 11, 116, 286);
+  dateLabel = label(homeScreen, "", 11, 106, 286);
   lv_obj_set_style_text_font(dateLabel, &desk_font_16_bold, 0);
   lv_obj_set_style_text_align(dateLabel, LV_TEXT_ALIGN_CENTER, 0);
   buildHomeDog();
-  clockPeriodLabel = label(homeScreen, "", 262, 95, 43);
-  lv_obj_set_style_text_font(clockPeriodLabel, &desk_font_10_bold, 0);
+  clockPeriodLabel = label(homeScreen, "", 242, 85, 43);
+  lv_obj_set_style_text_font(clockPeriodLabel, &desk_font_14_bold, 0);
   lv_obj_set_style_text_align(clockPeriodLabel, LV_TEXT_ALIGN_RIGHT, 0);
 
   wifiLabel = label(homeScreen, "Wi-Fi", 12, 9, 210);

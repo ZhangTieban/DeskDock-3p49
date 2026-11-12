@@ -1,0 +1,91 @@
+{
+  "unicode": "17.0",
+  "cjk_unified_total": 101984,
+  "cjk_compatibility_total": 1014,
+  "source": "https://kamichikoichi.github.io/jigmo/",
+  "files": {
+    "Jigmo.ttf": {
+      "bytes": 30048112,
+      "codepoints": 50845,
+      "sha256": "c8f295b9bd8f9f117a76b3a454aaaa1bb5b4babc18e254978c6deb88464e40cf"
+    },
+    "Jigmo2.ttf": {
+      "bytes": 35661996,
+      "codepoints": 63047,
+      "sha256": "5da3582efe77e22073b86b3b86b556d7111148a76b957cfb53318a91da2efff0"
+    },
+    "Jigmo3.ttf": {
+      "bytes": 7491948,
+      "codepoints": 13529,
+      "sha256": "815b18c1c670103723fe743090559208fdea47dc587ecb057a5a4721ee8dfeff"
+    },
+    "NotoSansTC-Bold.ttf": {
+      "bytes": 7144180,
+      "codepoints": 20745,
+      "sha256": "83684577f3577867fafe7e071aacfe5645f7e4e62d2a81c0d064748b881c6f6e"
+    },
+    "NotoSansTC-Regular.ttf": {
+      "bytes": 7149656,
+      "codepoints": 20745,
+      "sha256": "1c24967496e728dcd0c4eee1c12ff9cf551d14f0c34aae7d2d7d106cc33dc98b"
+    }
+  },
+  "ranges": {
+    "Basic": {
+      "expected": 20992,
+      "mapped": 20992,
+      "missing": []
+    },
+    "A": {
+      "expected": 6592,
+      "mapped": 6592,
+      "missing": []
+    },
+    "B": {
+      "expected": 42720,
+      "mapped": 42720,
+      "missing": []
+    },
+    "C": {
+      "expected": 4160,
+      "mapped": 4160,
+      "missing": []
+    },
+    "D": {
+      "expected": 222,
+      "mapped": 222,
+      "missing": []
+    },
+    "E": {
+      "expected": 5774,
+      "mapped": 5774,
+      "missing": []
+    },
+    "F": {
+      "expected": 7473,
+      "mapped": 7473,
+      "missing": []
+    },
+    "G": {
+      "expected": 4939,
+      "mapped": 4939,
+      "missing": []
+    },
+    "H": {
+      "expected": 4192,
+      "mapped": 4192,
+      "missing": []
+    },
+    "I": {
+      "expected": 622,
+      "mapped": 622,
+      "missing": []
+    },
+    "J": {
+      "expected": 4298,
+      "mapped": 4298,
+      "missing": []
+    }
+  },
+  "note": "Unicode mapped glyphs only; IVS shaping is not implemented by LVGL tiny_ttf."
+}

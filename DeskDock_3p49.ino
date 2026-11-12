@@ -13,6 +13,8 @@
 #include <AudioFileSourceICYStream.h>
 #include <AudioFileSourceBuffer.h>
 #include <AudioFileSourceFS.h>
+#include "BufferedSdSource.h"
+#include "audio_leveler.h"
 #include <AudioGeneratorMP3.h>
 #include <AudioGeneratorAAC.h>
 #include <AudioOutputI2S.h>
@@ -243,10 +245,12 @@ static void flushPendingSettings(bool force = false) {
   }
   xSemaphoreGive(configMutex);
 }
+static std::atomic<uint32_t> homePetTouch{0};
 extern "C" void desk_touch_activity(void) {
   const uint32_t now = millis();
   lastInputMs = now;
-  lastTouchMs.store(now);
+  const uint32_t previous = lastTouchMs.exchange(now);
+  if (now - previous > 250) homePetTouch.fetch_add(1);
 }
 static std::atomic<uint32_t> pendingTouchReport{0};
 extern "C" void desk_display_report(uint32_t rotate_us, uint32_t transfer_us) {
@@ -838,6 +842,13 @@ static bool setCodecRate(int hz) {
 
 class RadioI2SOutput : public AudioOutputI2S {
  public:
+  bool ConsumeSample(int16_t sample[2]) override {
+    int16_t leveled[2];
+    leveler.transform(sample, leveled);
+    if (!AudioOutputI2S::ConsumeSample(leveled)) return false;
+    leveler.accepted(sample);
+    return true;
+  }
   bool SetRate(int hz) override {
     if (!AudioOutputI2S::SetRate(hz)) return false;
     if (hz == codecRate) return true;
@@ -874,6 +885,7 @@ class RadioI2SOutput : public AudioOutputI2S {
   }
 
  private:
+  AudioLeveler leveler;
   bool txPaused = false;
   int codecRate = 0;
 };
@@ -1037,7 +1049,11 @@ static void radioAudioTask(void *) {
             driverSwitched = true;
             xSemaphoreGive(audioMutex);
           }
-          source = new AudioFileSourceFS(SD_MMC, path);
+          auto *sdSource = new BufferedSdSource(path);
+          source = sdSource;
+          const uint32_t bufferStarted = millis();
+          while (sdSource && sdSource->isOpen() && !sdSource->ready() &&
+                 radioCommand.load() == -1 && millis() - bufferStarted < 3000) vTaskDelay(1);
           if (source && source->isOpen()) {
             output = new RadioI2SOutput();
             decoder = new AudioGeneratorMP3();

@@ -1,9 +1,9 @@
 """Create complete fixed-weight Noto Sans TC fonts for the DeskDock SD card."""
 
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
 from fontTools.ttLib import TTFont
 from fontTools.varLib.instancer import instantiateVariableFont
+from package_full_fonts import main as package_full_fonts
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = Path(r"C:\Windows\Fonts\NotoSansTC-VF.ttf")
@@ -34,12 +34,7 @@ def main() -> None:
     old = DEST / "NotoSansTC-VF.ttf"
     if old.exists():
         old.unlink()
-    package = ROOT / "sdcard-fonts.zip"
-    with ZipFile(package, "w", ZIP_DEFLATED, compresslevel=9) as archive:
-        for item in sorted((ROOT / "sdcard").rglob("*")):
-            if item.is_file():
-                archive.write(item, item.relative_to(ROOT / "sdcard"))
-    print(f"Package: {package} ({package.stat().st_size} bytes)")
+    package_full_fonts()
 
 
 if __name__ == "__main__":
