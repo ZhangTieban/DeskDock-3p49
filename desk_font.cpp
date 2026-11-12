@@ -1,6 +1,7 @@
 #include "desk_font.h"
 #include <SD_MMC.h>
 #include <new>
+#include <atomic>
 #include <cstring>
 #include "sd_access.h"
 
@@ -95,7 +96,7 @@ lv_font_t desk_font_70 = makeFont(&desk_blob_70, 80, 8, &lv_font_montserrat_14);
 lv_font_t desk_font_86 = makeFont(&desk_blob_86, 98, 10, &lv_font_montserrat_14);
 lv_font_t desk_font_88 = makeFont(&desk_blob_88, 99, 9, &lv_font_montserrat_14);
 
-static bool sdMounted = false;
+static std::atomic<bool> sdMounted{false};
 static lv_fs_drv_t sdFontFs;
 
 static bool sdFontReady(lv_fs_drv_t *) { return sdMounted; }
@@ -139,9 +140,10 @@ static lv_fs_res_t sdFontTell(lv_fs_drv_t *, void *handle, uint32_t *position) {
   return LV_FS_RES_OK;
 }
 
-bool deskFontSdMounted() { return sdMounted; }
+bool deskFontSdMounted() { return sdMounted.load(); }
 
 bool deskFontMountSd() {
+  DeskSdLock lock;
   if (sdMounted) return true;
   if (!SD_MMC.setPins(41, 39, 40) ||
       !SD_MMC.begin("/sdcard", true, false, BOARD_MAX_SDMMC_FREQ, 40)) {

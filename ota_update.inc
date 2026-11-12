@@ -16,7 +16,6 @@ static std::atomic<OtaStage> otaStage{OtaStage::Idle};
 static std::atomic<OtaError> otaError{OtaError::None};
 static std::atomic<int> otaProgress{0};
 static std::atomic<bool> otaBusy{false};
-static bool otaSdMounted = false;
 static std::atomic<bool> otaPendingVerify{false};
 static uint32_t otaBootReadyMs = 0;
 
@@ -155,7 +154,8 @@ static bool otaStopAudio() {
   radioCommand.store(0);
   const uint32_t start = millis();
   while ((uint32_t)(millis() - start) < 25000) {
-    if (radioCommand.load() == -1 && radioState.load() == 0 && mp3State.load() == 0) {
+    if (radioCommand.load() == -1 && radioState.load() == 0 && mp3State.load() == 0 &&
+        !audioStreamClosing.load()) {
       vTaskDelay(pdMS_TO_TICKS(300));
       return true;
     }
@@ -194,14 +194,7 @@ static esp_err_t otaHttpEvent(esp_http_client_event_t *event) {
 }
 
 static bool otaDownloadToSd() {
-  if (!otaSdMounted) {
-    otaSdMounted = deskFontSdMounted() ||
-                   (SD_MMC.setPins(41, 39, 40) &&
-                    SD_MMC.begin("/sdcard", true, false, BOARD_MAX_SDMMC_FREQ, 20));
-  }
-  if (!otaSdMounted || SD_MMC.cardType() == CARD_NONE) {
-    if (otaSdMounted) SD_MMC.end();
-    otaSdMounted = false;
+  if (!deskFontMountSd() || SD_MMC.cardType() == CARD_NONE) {
     otaSetError(OtaError::Sd, "SD mount failed; check FAT32 card and GPIO39/40/41");
     return false;
   }
@@ -283,6 +276,22 @@ static bool otaInstallFromSd() {
     otaSetError(OtaError::Sd, "verified firmware file unavailable or invalid");
     return false;
   }
+  // Reject a wrong app before erasing the saved previous partition.
+  char identity[24] = {};
+  bool found = false;
+  const bool matches = deskReadImageIdentity(otaManifest.size,identity,found,
+    [&input](uint32_t offset, uint8_t *block, size_t count) {
+      return input.seek(offset) && input.read(block,count) == count;
+    }, []() { vTaskDelay(1); }) && found && !strcmp(identity,otaManifest.version);
+  esp_image_header_t header = {};
+  input.seek(0);
+  const bool boardMatches = input.read(reinterpret_cast<uint8_t *>(&header),sizeof(header)) == sizeof(header) &&
+                            header.chip_id == ESP_CHIP_ID_ESP32S3;
+  if (!matches || !boardMatches) {
+    input.close();
+    otaSetError(OtaError::Hash, "DeskDock firmware board/version mismatch");
+    return false;
+  }
   input.seek(0);
   otaStage.store(OtaStage::Installing);
   esp_ota_handle_t handle = 0;
@@ -303,6 +312,12 @@ static bool otaInstallFromSd() {
   input.close();
   if (err == ESP_OK) err = esp_ota_end(handle);
   else if (handle) esp_ota_abort(handle);
+  if (err == ESP_OK) {
+    char writtenIdentity[24] = {};
+    bool writtenFound = false;
+    if (!rollbackReadIdentity(next,otaManifest.size,writtenIdentity,writtenFound) ||
+        !writtenFound || strcmp(writtenIdentity,otaManifest.version)) err = ESP_FAIL;
+  }
   if (err == ESP_OK) err = esp_ota_set_boot_partition(next);
   if (err != ESP_OK) {
     Serial.printf("[OTA] write error=%s\n", esp_err_to_name(err));
@@ -322,7 +337,7 @@ static void otaWorker(void *parameter) {
   bool successful = false;
   if (WiFi.status() != WL_CONNECTED)
     otaSetError(OtaError::Wifi, "Wi-Fi disconnected");
-  else if (!otaStopAudio())
+  else if ((install || resumeStation) && !otaStopAudio())
     otaSetError(OtaError::Radio, "audio could not stop");
   else if (!install) {
     otaStage.store(OtaStage::Checking);

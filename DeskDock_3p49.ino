@@ -145,9 +145,14 @@ static std::atomic<bool> ntpSynced{false};
 static std::atomic<bool> beepPending{false};
 static I2SClass audioI2s;
 static es8311_handle_t codec = nullptr;
-static bool audioReady = false;
-static int appliedVolume = -1;
+static std::atomic<bool> audioReady{false};
+static std::atomic<int> appliedVolume{-1};
+static std::atomic<int> desiredAudioVolume{40};
 static SemaphoreHandle_t audioMutex;
+static SemaphoreHandle_t codecControlMutex;
+static std::atomic<bool> radioSessionActive{false}, radioLinkLost{false};
+static std::atomic<bool> codecMutedForLinkLoss{false};
+static std::atomic<bool> audioStreamClosing{false};
 static SemaphoreHandle_t networkHttpMutex;
 static constexpr int kMp3PlayCommand = 100;
 static constexpr int kMp3PauseCommand = -3;
@@ -423,6 +428,7 @@ static void loadConfig() {
                    constrain(((oldBrightness - 15) * 100 + 42) / 85, 0, 100);
   cfg.sleepMinutes = constrain(prefs.getInt("sleep", 10), 0, 60);
   cfg.volume = constrain(prefs.getInt("volume", 40), 0, 100);
+  desiredAudioVolume.store(cfg.volume);
   cfg.hour12 = prefs.getBool("hour12", false);
   cfg.weatherMain = constrain(prefs.getInt("wx_main", 0), 0, kWeatherMetrics - 1);
   cfg.weatherDetail = constrain(prefs.getInt("wx_detail", 1), 0, kWeatherMetrics - 1);
@@ -776,12 +782,28 @@ static int codecVolumePercent(int uiVolume) {
   return 100;
 }
 
-static bool writeCodecVolume(int uiVolume) {
-  if (uiVolume <= 0) return es8311_voice_mute(codec, true) == ESP_OK;
+static bool writeCodecVolumeLocked(int uiVolume) {
   int actual = 0;
-  if (es8311_voice_volume_set(codec, codecVolumePercent(uiVolume), &actual) != ESP_OK)
-    return false;
-  return es8311_voice_mute(codec, false) == ESP_OK;
+  bool ok = uiVolume <= 0 ||
+      es8311_voice_volume_set(codec, codecVolumePercent(uiVolume), &actual) == ESP_OK;
+  const bool linkLost = radioLinkLost.load();
+  if (ok) ok = es8311_voice_mute(codec, uiVolume <= 0 || linkLost) == ESP_OK;
+  codecMutedForLinkLoss.store(ok && linkLost);
+  return ok;
+}
+static bool writeCodecVolume(int uiVolume) {
+  if (!codec || !codecControlMutex) return false;
+  xSemaphoreTake(codecControlMutex, portMAX_DELAY);
+  const bool ok = writeCodecVolumeLocked(uiVolume);
+  xSemaphoreGive(codecControlMutex);
+  return ok;
+}
+
+static bool applyDesiredAudioVolume() {
+  const int volume = desiredAudioVolume.load();
+  if (!writeCodecVolume(volume)) return false;
+  appliedVolume.store(volume);
+  return true;
 }
 
 static void initAudio() {
@@ -798,13 +820,23 @@ static void initAudio() {
   };
   if (es8311_init(codec, &clock, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK) return;
   (void)es8311_microphone_config(codec, false);
-  if (!writeCodecVolume(cfg.volume)) return;
-  appliedVolume = cfg.volume;
+  if (!applyDesiredAudioVolume()) return;
   audioReady = true;
   Serial.println("[AUDIO] ready");
 }
 
 static void audioTick() {
+  // Independent of the decoder task: HTTP reads/teardown can wait for seconds.
+  // The disconnect latch is cleared only when the owner opens a fresh source.
+  if (radioSessionActive.load() && WiFi.status() != WL_CONNECTED)
+    radioLinkLost.store(true);
+  if (radioLinkLost.load() && !codecMutedForLinkLoss.load() && codec &&
+      codecControlMutex && xSemaphoreTake(codecControlMutex, 0) == pdTRUE) {
+    const bool muted = es8311_voice_mute(codec, true) == ESP_OK;
+    codecMutedForLinkLoss.store(muted);
+    xSemaphoreGive(codecControlMutex);
+    if (muted) Serial.println("[RADIO] Wi-Fi lost: codec muted");
+  }
   if (!audioReady) return;
   const int playing = radioState.load();
   const int local = mp3State.load();
@@ -813,10 +845,8 @@ static void audioTick() {
     return;
   }
   if (audioMutex) xSemaphoreTake(audioMutex, portMAX_DELAY);
-  if (appliedVolume != cfg.volume) {
-    if (writeCodecVolume(cfg.volume)) appliedVolume = cfg.volume;
-  }
-  if (!beepPending.exchange(false) || cfg.volume == 0) {
+  if (appliedVolume.load() != desiredAudioVolume.load()) (void)applyDesiredAudioVolume();
+  if (!beepPending.exchange(false) || desiredAudioVolume.load() == 0) {
     if (audioMutex) xSemaphoreGive(audioMutex);
     return;
   }
@@ -836,11 +866,13 @@ static bool setCodecRate(int hz) {
     .mclk_inverted = false, .sclk_inverted = false, .mclk_from_mclk_pin = true,
     .mclk_frequency = hz * 256, .sample_frequency = hz
   };
-  if (es8311_init(codec, &clock, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK)
-    return false;
-  if (!writeCodecVolume(cfg.volume)) return false;
-  appliedVolume = cfg.volume;
-  return true;
+  xSemaphoreTake(codecControlMutex, portMAX_DELAY);
+  const int volume = desiredAudioVolume.load();
+  const bool ok = es8311_init(codec, &clock, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) == ESP_OK &&
+                  writeCodecVolumeLocked(volume);
+  if (ok) appliedVolume.store(volume);
+  xSemaphoreGive(codecControlMutex);
+  return ok;
 }
 
 class RadioI2SOutput : public AudioOutputI2S {
@@ -864,6 +896,19 @@ class RadioI2SOutput : public AudioOutputI2S {
     return true;
   }
   bool codecConfigured() const { return codecRate > 0; }
+
+  void drainEndOfTrack() {
+    if (!i2sOn || txPaused) return;
+    const uint32_t start = millis();
+    const size_t queuedSamples = _buffers * _bufferWords;
+    int16_t silence[2] = {};
+    size_t accepted = 0;
+    // Never use the library's unbounded flush; manual stop/switch interrupts this.
+    while (accepted < queuedSamples && millis()-start < 750 && radioCommand.load() == -1) {
+      if (AudioOutputI2S::ConsumeSample(silence)) ++accepted;
+      else vTaskDelay(1);
+    }
+  }
 
   bool pauseOutput() {
     if (!i2sOn || txPaused || i2s_channel_disable(_tx_handle) != ESP_OK) return false;
@@ -930,6 +975,10 @@ static void radioAudioTask(void *) {
   wifi_ps_type_t previousWifiSleep = WIFI_PS_MIN_MODEM;
   bool wifiSleepChanged = false;
   auto closeStream = [&]() {
+    audioStreamClosing.store(true);
+    // Disable DMA before waiting for a source producer or HTTP teardown.
+    if (output) output->stop();
+    radioSessionActive.store(false);
     if (decoder) {
       if (decoder->isRunning()) decoder->stop();
       delete decoder;
@@ -939,6 +988,7 @@ static void radioAudioTask(void *) {
     if (encodedBuffer) { heap_caps_free(encodedBuffer); encodedBuffer = nullptr; }
     if (source) { delete source; source = nullptr; hls = nullptr; }
     if (output) { output->stop(); delete output; output = nullptr; }
+    audioStreamClosing.store(false);
   };
   auto restoreI2s = [&]() {
     if (!driverSwitched) return;
@@ -999,9 +1049,15 @@ static void radioAudioTask(void *) {
         retryStation = 0;
         retryCount = 0;
       }
+      audioStreamClosing.store(true);
       radioState.store(mp3Requested ? 0 : command > 0 ? 1 : command == -2 ? 3 : 0);
       mp3State.store(mp3Requested ? 1 : 0);
       closeStream();
+      radioLinkLost.store(false);
+      codecMutedForLinkLoss.store(false);
+      // A failed connection may have muted the codec before taking over I2S.
+      appliedVolume.store(-1);
+      radioSessionActive.store(command > 0 && !mp3Requested);
       if (mp3Requested && (previousRadioState == 1 || previousRadioState == 2))
         Serial.println("[RADIO] stopped for MP3");
       if (command > 0 && !mp3Requested && previousMp3State >= 1 && previousMp3State <= 3)
@@ -1152,7 +1208,8 @@ static void radioAudioTask(void *) {
             AudioFileSource *audioSource = hls ? source : static_cast<AudioFileSource *>(buffer);
             const bool prebuffered = hls ? hls->buffered() >= 32768 :
                                       buffer && buffer->getFillLevel() >= 65536;
-            if (audioSource && prebuffered &&
+            if (audioSource && prebuffered && !radioLinkLost.load() &&
+                WiFi.status() == WL_CONNECTED &&
                 radioCommand.load() == -1 && output && decoder &&
                 output->SetBuffers(8, 2304) &&
                 output->SetPinout(15, 46, 45, 7) &&
@@ -1184,10 +1241,9 @@ static void radioAudioTask(void *) {
                       (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                       (unsigned)uxTaskGetStackHighWaterMark(nullptr));
       }
-      if (appliedVolume != cfg.volume) {
-        if (writeCodecVolume(cfg.volume)) appliedVolume = cfg.volume;
-      }
-      if (WiFi.status() != WL_CONNECTED || !decoder->isRunning() || !decoder->loop()) {
+      if (appliedVolume.load() != desiredAudioVolume.load()) (void)applyDesiredAudioVolume();
+      if (radioLinkLost.load() || WiFi.status() != WL_CONNECTED ||
+          !decoder->isRunning() || !decoder->loop() || radioLinkLost.load()) {
         Serial.println("[RADIO] stream ended");
         if ((uint32_t)(millis() - playingSinceMs) >= 60000) retryCount = 0;
         int expected = -1;
@@ -1203,13 +1259,12 @@ static void radioAudioTask(void *) {
         if (size) mp3Progress.store((int)std::min((uint64_t)1000,
                                                 (uint64_t)source->getPos() * 1000 / size));
       }
-      if (appliedVolume != cfg.volume) {
-        if (writeCodecVolume(cfg.volume)) appliedVolume = cfg.volume;
-      }
+      if (appliedVolume.load() != desiredAudioVolume.load()) (void)applyDesiredAudioVolume();
       if (!decoder->isRunning() || !decoder->loop()) {
         const uint32_t size = source->getSize();
         const bool reachedEnd = size && source->getPos() >= size && decoder->isRunning();
         Serial.println(reachedEnd ? "[MP3] playback ended" : "[MP3] playback interrupted");
+        if (reachedEnd && output) output->drainEndOfTrack();
         closeStream();
         if (reachedEnd) mp3Progress.store(1000);
         if (reachedEnd && mp3Repeat.load() != Mp3Repeat::Off) {
@@ -1819,6 +1874,7 @@ static void changeVolume(lv_event_t *event) {
   const int next = constrain(cfg.volume + delta, 0, 100);
   if (next == cfg.volume) return;
   cfg.volume = next;
+  desiredAudioVolume.store(next);
   if (volumeValueLabel) lv_label_set_text_fmt(volumeValueLabel, "%d%%", cfg.volume);
   deferSetting(2, cfg.volume);
   lastInputMs = millis();
@@ -3128,6 +3184,8 @@ void setup() {
   loadConfig();
   configMutex = xSemaphoreCreateMutex();
   audioMutex = xSemaphoreCreateMutex();
+  codecControlMutex = xSemaphoreCreateMutex();
+  if (!codecControlMutex) abort();
   mp3RequestMutex = xSemaphoreCreateMutex();
   networkHttpMutex = xSemaphoreCreateMutex();
   i2c_master_Init();
@@ -3174,6 +3232,10 @@ void setup() {
   WiFi.setAutoReconnect(false);
   WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
     wifiDisconnectReason.store(info.wifi_sta_disconnected.reason);
+    if (radioSessionActive.load()) {
+      radioLinkLost.store(true);
+      codecMutedForLinkLoss.store(false);
+    }
   }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   if (wifiProfileCount) startWifiProfile(0);
   sntp_set_time_sync_notification_cb(onNtpSync);

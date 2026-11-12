@@ -24,6 +24,17 @@ jobs:
           arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core install esp32:esp32@3.3.7 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli lib install lvgl@9.5.0 ESP8266Audio@2.4.1
+      - name: Apply verified MP3 decoder boundary fix
+        run: |
+          ARDUINO_USER_DIR="$(arduino-cli config get directories.user)"
+          python3 DeskDock_3p49/tools/patch_audio_library.py --library-dir "$ARDUINO_USER_DIR/libraries/ESP8266Audio"
+      - name: Run packaging and audio policy checks
+        run: |
+          python3 -m unittest discover -s DeskDock_3p49/tools -p 'test_firmware_identity.py'
+          python3 -m unittest discover -s DeskDock_3p49/tools -p 'test_audio_patch.py'
+          g++ -std=c++17 -fsyntax-only DeskDock_3p49/tools/test_rollback_policy.cpp
+          g++ -std=c++17 DeskDock_3p49/tools/test_audio_policy.cpp -o /tmp/deskdock-policy-tests
+          /tmp/deskdock-policy-tests
       - name: Build app and custom partition table
         run: |
           arduino-cli compile \

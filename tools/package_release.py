@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 from pathlib import Path
+from firmware_identity import validate_firmware
 
 BOARD = "DeskDock-3p49"
 VERSION_SOURCE = Path(__file__).resolve().parents[1] / "ota_config.h"
@@ -22,8 +23,10 @@ def main() -> None:
         parser.error("DESKDOCK_VERSION must be a numeric MAJOR.MINOR.PATCH")
     version = match.group(1)
     payload = args.bin.read_bytes()
-    if not 0x10000 <= len(payload) <= 0x400000 or payload[0] != 0xE9:
-        parser.error("Expected an ESP32 app image between 64 KiB and 4 MiB")
+    try:
+        validate_firmware(payload, version)
+    except ValueError as error:
+        parser.error(str(error))
     args.out.mkdir(parents=True, exist_ok=True)
     target = args.out / "firmware.bin"
     shutil.copyfile(args.bin, target)

@@ -1,5 +1,6 @@
 #include <esp_image_format.h>
 #include "ota_rollback_policy.h"
+#include "ota_identity_scan.h"
 #include "ota_legacy_images.h"
 
 // Referenced in boot logging so the linker retains this identity in the image.
@@ -43,27 +44,10 @@ static void rollbackClearRequest() {
 
 static bool rollbackReadIdentity(const esp_partition_t *partition, uint32_t imageSize,
                                  char (&version)[24], bool &found) {
-  static constexpr char prefix[] = DESKDOCK_ROLLBACK_ID_PREFIX;
-  uint8_t block[4096 + 96];
-  size_t carry = 0;
-  found = false;
-  for (uint32_t offset = 0; offset < imageSize;) {
-    const size_t count = std::min(size_t(4096), size_t(imageSize-offset));
-    if (esp_partition_read(partition, offset, block + carry, count) != ESP_OK) return false;
-    const size_t used = carry + count;
-    for (size_t i = 0; i + sizeof(prefix) < used; ++i) {
-      if (memcmp(block+i, prefix, sizeof(prefix)-1)) continue;
-      char candidate[24] = {};
-      if (!rollbackMarkerVersion(reinterpret_cast<const char *>(block+i),used-i,candidate)) continue;
-      if (found && strcmp(candidate,version)) return false;
-      strlcpy(version,candidate,sizeof(version)); found = true;
-    }
-    offset += count;
-    carry = std::min(size_t(96),used);
-    memmove(block,block+used-carry,carry);
-    vTaskDelay(1);
-  }
-  return true;
+  return deskReadImageIdentity(imageSize,version,found,
+    [partition](uint32_t offset, uint8_t *block, size_t count) {
+      return esp_partition_read(partition,offset,block,count) == ESP_OK;
+    }, []() { vTaskDelay(1); });
 }
 
 static RollbackStage rollbackInspect(RollbackTarget &target) {

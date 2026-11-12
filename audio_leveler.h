@@ -6,11 +6,16 @@
 
 // Shared radio/MP3 loudness compensation, with bounded gain and peak limiting.
 // Feed the meter only after the I2S driver accepts the sample (retries are common).
+static constexpr int audioLimitedGain(int peak,int gain) {
+  // The largest product is 32768 * 8192, within signed 32-bit range.
+  constexpr int limit = 30000 * 4096;
+  return peak && peak * gain > limit ? limit / peak : gain;
+}
 class AudioLeveler {
  public:
   void transform(const int16_t input[2], int16_t output[2]) const {
     const int peak = std::max(abs(int(input[0])), abs(int(input[1])));
-    const int gain = peak ? std::min(gain_, int((int64_t(30000) * 4096) / peak)) : gain_;
+    const int gain = audioLimitedGain(peak,gain_);
     output[0] = int32_t(input[0]) * gain / 4096;
     output[1] = int32_t(input[1]) * gain / 4096;
   }

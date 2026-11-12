@@ -16,6 +16,8 @@ Arduino 要求 sketch 目錄與主 `.ino` 同名，因此 clone 時指定目錄�
 ```sh
 git clone https://github.com/ZhangTieban/DeskDock-3p49.git DeskDock_3p49
 cd DeskDock_3p49
+# 安裝上述固定版本的 ESP8266Audio 後，先套用與 CI 相同的邊界修正：
+python3 tools/patch_audio_library.py --library-dir "$(arduino-cli config get directories.user)/libraries/ESP8266Audio"
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=huge_app' \
   --build-path build-ci .
