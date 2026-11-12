@@ -17,7 +17,7 @@ static std::atomic<OtaError> otaError{OtaError::None};
 static std::atomic<int> otaProgress{0};
 static std::atomic<bool> otaBusy{false};
 static bool otaSdMounted = false;
-static bool otaPendingVerify = false;
+static std::atomic<bool> otaPendingVerify{false};
 static uint32_t otaBootReadyMs = 0;
 
 static void otaSetError(OtaError code, const char *detail) {
@@ -163,6 +163,8 @@ static bool otaStopAudio() {
   }
   return false;
 }
+
+#include "ota_rollback_core.inc"
 
 struct OtaDownload {
   File *file;
@@ -348,8 +350,11 @@ static void otaWorker(void *parameter) {
 }
 
 static void otaButtonClicked(lv_event_t *) {
+  if (otaRollbackDialogOpen()) return;
   if (otaBusy.exchange(true)) return;
   const bool install = otaStage.load() == OtaStage::Available;
+  // An install can replace the saved previous image even if the update later fails.
+  if (install) rollbackStage.store(RollbackStage::Unchecked);
   otaError.store(OtaError::None);
   otaProgress.store(0);
   otaStage.store(install ? OtaStage::Downloading : OtaStage::Checking);
@@ -360,11 +365,13 @@ static void otaButtonClicked(lv_event_t *) {
   }
 }
 
+#include "ota_rollback_ui.inc"
+
 static void refreshOtaUi() {
   if (!otaButton || !otaStatusLabel) return;
   const OtaStage stage = otaStage.load();
   const char *action = stage == OtaStage::Available ? "安裝更新" : "檢查更新";
-  lv_obj_t *buttonLabel = lv_obj_get_child(otaButton, 0);
+  lv_obj_t *buttonLabel = otaInstallButton ? lv_obj_get_child(otaInstallButton, 0) : nullptr;
   if (buttonLabel && strcmp(lv_label_get_text(buttonLabel), action))
     lv_label_set_text(buttonLabel, action);
   char text[40];
@@ -391,9 +398,13 @@ static void refreshOtaUi() {
   }
   if (strcmp(lv_label_get_text(otaStatusLabel), text))
     lv_label_set_text(otaStatusLabel, text);
+  if (otaPanelStatusLabel && strcmp(lv_label_get_text(otaPanelStatusLabel),text))
+    lv_label_set_text(otaPanelStatusLabel,text);
+  refreshRollbackUi();
 }
 
 static void otaCheckFirstBoot() {
+  rollbackCheckBootRecord();
   const esp_partition_t *running = esp_ota_get_running_partition();
   Serial.printf("[OTA] running=%s version=%s\n",
                 running ? running->label : "unknown", DESKDOCK_VERSION);
@@ -406,14 +417,15 @@ static void otaCheckFirstBoot() {
 }
 
 static void otaConfirmFirstBoot(uint32_t now) {
-  if (!otaPendingVerify) return;
+  if (!otaPendingVerify && rollbackBoot.load() != RollbackBoot::Waiting) return;
   if (!otaBootReadyMs) otaBootReadyMs = now;
   if ((uint32_t)(now - otaBootReadyMs) < 10000 || !homeScreen ||
       !settingsScreen || !radioTaskHandle || !networkTaskHandle) return;
-  const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+  const esp_err_t err = otaPendingVerify ? esp_ota_mark_app_valid_cancel_rollback() : ESP_OK;
   if (err == ESP_OK) {
     otaPendingVerify = false;
     Serial.println("[OTA] first boot valid");
+    rollbackConfirmBoot();
   } else {
     Serial.printf("[OTA] first boot confirmation failed: %s\n", esp_err_to_name(err));
   }

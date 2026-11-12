@@ -303,6 +303,9 @@ static lv_obj_t *networkLabel, *wifiList, *weatherPreviewLabels[kWeatherSlots], 
 static lv_obj_t *stockPreviewLabel, *hourModeButton;
 static lv_obj_t *otaButton, *otaStatusLabel;
 static void otaButtonClicked(lv_event_t *);
+static void otaOpenPanel(lv_event_t *);
+static bool otaRollbackDialogOpen();
+static bool otaNavigateAway();
 static void refreshOtaUi();
 static void otaCheckFirstBoot();
 static void otaConfirmFirstBoot(uint32_t now);
@@ -1503,6 +1506,7 @@ static void closeEditor() {
 static void toggleSettingsFromButton() {
   if (!settingsTogglePending || !lvgl_port_lock(100)) return;
   settingsTogglePending = false;
+  if (!otaNavigateAway()) { lvgl_port_unlock(); return; }
   if (lv_screen_active() == settingsScreen) goHome(nullptr);
   else {
     if (editorScreen && lv_screen_active() == editorScreen) closeEditor();
@@ -2191,33 +2195,33 @@ static void buildSettings() {
     lv_obj_set_style_border_color(card, lv_color_hex(0x28372F), 0);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   }
-  generalLabel(generalCards[0], "亮度", 10, 5, 70);
+  generalLabel(generalCards[0], "亮度", 10, 2, 70);
   brightnessValueLabel = generalLabel(generalCards[0], "", 100, 5, 90);
   lv_obj_set_style_text_align(brightnessValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(brightnessValueLabel, "%d%%", cfg.brightness);
   adjustButton(generalCards[0], "-", 9, 26, changeBrightness, -5, 86, 27);
   adjustButton(generalCards[0], "+", 105, 26, changeBrightness, 5, 86, 27);
 
-  generalLabel(generalCards[1], "省電", 10, 5, 70);
+  generalLabel(generalCards[1], "螢幕省電", 10, 2, 80);
   sleepValueLabel = generalLabel(generalCards[1], "", 100, 5, 90);
   lv_obj_set_style_text_align(sleepValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(sleepValueLabel, "%d 分", cfg.sleepMinutes);
   adjustButton(generalCards[1], "-", 9, 26, changeSleep, -5, 86, 27);
   adjustButton(generalCards[1], "+", 105, 26, changeSleep, 5, 86, 27);
 
-  generalLabel(generalCards[2], "音量", 10, 5, 70);
+  generalLabel(generalCards[2], "音量", 10, 2, 70);
   volumeValueLabel = generalLabel(generalCards[2], "", 100, 5, 90);
   lv_obj_set_style_text_align(volumeValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(volumeValueLabel, "%d%%", cfg.volume);
   adjustButton(generalCards[2], "-", 9, 26, changeVolume, -5, 86, 27);
   adjustButton(generalCards[2], "+", 105, 26, changeVolume, 5, 86, 27);
 
-  generalLabel(generalCards[3], "日期與時間", 10, 5, 180);
+  generalLabel(generalCards[3], "日期與時間", 10, 2, 180);
   generalButton(generalCards[3], "設定時間", 9, 26, 86, 27, editDateTime);
   hourModeButton = generalButton(generalCards[3], cfg.hour12 ? "12 小時" : "24 小時",
                                  105, 26, 86, 27, changeHourMode);
 
-  generalLabel(generalCards[4], "內容輪播", 10, 5, 90);
+  generalLabel(generalCards[4], "內容輪播", 10, 2, 90);
   carouselValueLabel = generalLabel(generalCards[4], "", 100, 5, 90);
   lv_obj_set_style_text_align(carouselValueLabel, LV_TEXT_ALIGN_RIGHT, 0);
   lv_label_set_text_fmt(carouselValueLabel, "%d 秒", cfg.carouselSeconds);
@@ -2226,11 +2230,11 @@ static void buildSettings() {
                                       56, 26, 88, 27, toggleHomeCarouselPause);
   adjustButton(generalCards[4], "+", 149, 26, changeHomeCarouselInterval, 5, 42, 27);
 
-  generalLabel(generalCards[5], "系統與網路", 10, 5, 90);
+  generalLabel(generalCards[5], "系統與網路", 10, 2, 90);
   otaStatusLabel = generalLabel(generalCards[5], DESKDOCK_VERSION, 100, 5, 90);
   lv_obj_set_style_text_align(otaStatusLabel, LV_TEXT_ALIGN_RIGHT, 0);
   generalButton(generalCards[5], "Wi-Fi", 9, 26, 86, 27, openWifiSettings);
-  otaButton = generalButton(generalCards[5], "檢查更新", 105, 26, 86, 27, otaButtonClicked);
+  otaButton = generalButton(generalCards[5], "更新/退版", 105, 26, 86, 27, otaOpenPanel);
 
   // Wi-Fi uses the full display so four touch-sized rows fit below one toolbar.
   lv_obj_set_pos(network, 0, 0);
@@ -3054,6 +3058,7 @@ static void refreshUi() {
   }
   homeSetText(clockLabel, clockText);
   homeSetText(clockPeriodLabel, period);
+  alignHomeClockPeriod(clockText,period);
   homeSetText(dateLabel, dateText);
   setHomeDogTime(timeReady ? t.tm_hour * 60 + t.tm_min : -1);
   char status[28];

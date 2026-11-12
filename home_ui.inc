@@ -383,6 +383,23 @@ static lv_obj_t *homeControl(lv_obj_t *parent, const char *icon, const char *cap
 
 #include "home_dog.inc"
 
+static int homeTextInkBottom(const lv_font_t *font, const char *text) {
+  int bottom = 0;
+  for (const unsigned char *c = reinterpret_cast<const unsigned char *>(text); *c; ++c) {
+    lv_font_glyph_dsc_t glyph = {};
+    if (lv_font_get_glyph_dsc(font,&glyph,*c,0) && glyph.box_h)
+      bottom = std::max(bottom,int(font->line_height)-int(font->base_line)-int(glyph.ofs_y));
+  }
+  return bottom;
+}
+
+static void alignHomeClockPeriod(const char *clock, const char *period) {
+  if (!period[0]) return;
+  const int y = lv_obj_get_y(clockLabel) + homeTextInkBottom(&desk_font_88,clock) -
+                homeTextInkBottom(&desk_font_14_bold,period);
+  if (lv_obj_get_y(clockPeriodLabel) != y) lv_obj_set_y(clockPeriodLabel,y);
+}
+
 static void buildHome() {
   homeScreen = lv_obj_create(nullptr);
   lv_obj_set_style_bg_color(homeScreen, lv_color_hex(kHomeBackground), 0);
@@ -390,14 +407,14 @@ static void buildHome() {
   lv_obj_clear_flag(homeScreen, LV_OBJ_FLAG_SCROLLABLE);
   homeRule(homeScreen, 307, 8, 1, 156);
 
-  clockLabel = label(homeScreen, "--:--", 8, -2, 298, 88);
+  clockLabel = label(homeScreen, "--:--", 8, 3, 298, 88);
   lv_obj_set_style_text_font(clockLabel, &desk_font_88, 0);
   lv_obj_set_style_text_align(clockLabel, LV_TEXT_ALIGN_CENTER, 0);
-  dateLabel = label(homeScreen, "", 11, 106, 286);
+  dateLabel = label(homeScreen, "", 11, 111, 286);
   lv_obj_set_style_text_font(dateLabel, &desk_font_16_bold, 0);
   lv_obj_set_style_text_align(dateLabel, LV_TEXT_ALIGN_CENTER, 0);
   buildHomeDog();
-  clockPeriodLabel = label(homeScreen, "", 242, 85, 43);
+  clockPeriodLabel = label(homeScreen, "", 247, 78, 43);
   lv_obj_set_style_text_font(clockPeriodLabel, &desk_font_14_bold, 0);
   lv_obj_set_style_text_align(clockPeriodLabel, LV_TEXT_ALIGN_RIGHT, 0);
 

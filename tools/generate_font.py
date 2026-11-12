@@ -22,7 +22,8 @@ TEXT = (
 ASCII = "".join(chr(i) for i in range(32, 127))
 SOURCE_UNICODE = "".join(
     char for path in (ROOT / "DeskDock_3p49.ino", ROOT / "home_ui.inc",
-                      ROOT / "ota_update.inc")
+                      ROOT / "ota_update.inc", ROOT / "ota_rollback_core.inc",
+                      ROOT / "ota_rollback_ui.inc")
     for char in path.read_text(encoding="utf-8")
     if ord(char) >= 0xA0
 )
@@ -76,8 +77,8 @@ def emit_font(size, chars, font_path=FONT, suffix="", weight=None):
 content = "// Generated from Noto Sans TC, D-DIN, Noto Sans Symbols (SIL OFL). Do not edit by hand.\n"
 content += emit_font(16, ASCII + TEXT + SOURCE_UNICODE) + "\n"
 content += emit_font(16, ASCII + TEXT + SOURCE_UNICODE, suffix="_bold", weight=700) + "\n"
-content += emit_font(14, "最高最低成交量股降雨濕度體感風速日落認識阿喵周年生日快樂~UV 0123456789.,:/%°Ckmh-", suffix="_bold", weight=700) + "\n"
-content += emit_font(10, "上一台播放暫停下降雨更新預報資料 Wi-Fi·0123456789:/%", suffix="_bold", weight=700) + "\n"
+content += emit_font(14, "最高最低成交量股降雨濕度體感風速日落認識阿喵周年生日快樂~UV AMPM0123456789.,:/%°Ckmh-", suffix="_bold", weight=700) + "\n"
+content += emit_font(10, "上一台播放暫停下降雨更新預報資料退版啟動確認中完成已未回到目前上次目標， Wi-Fi·0123456789.:/%", suffix="_bold", weight=700) + "\n"
 content += emit_font(18, "0123456789 /-", DIN_REGULAR) + "\n"
 content += emit_font(20, ASCII + TEXT + SOURCE_UNICODE) + "\n"
 content += emit_font(20, "0123456789.,+-°C%", HANKEN, suffix="_bold", weight=700) + "\n"

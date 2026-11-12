@@ -1,4 +1,43 @@
     const petData = __PET_DATA__;
+    const clockFonts = __CLOCK_FONT_DATA__;
+    const clockPixels = root.querySelector('.dock-clock-bitmap');
+    const periodPixels = root.querySelector('.dock-period-bitmap');
+    const datePixels = root.querySelector('.dock-date-bitmap');
+    let lastClockSignature='';
+    function inkBottom(font,text){return Math.max(0,...[...text].map(c=>font.height-font.base-font.glyphs[c].y));}
+    function clockBitmap(canvas,font,text,right){
+      const context=canvas.getContext('2d');
+      context.clearRect(0,0,canvas.width,canvas.height);
+      if(!text)return;
+      const width=[...text].reduce((sum,c)=>sum+font.glyphs[c].advance,0);
+      let pen=right?canvas.width-width:Math.floor((canvas.width-width)/2);
+      const image=context.createImageData(canvas.width,canvas.height);
+      for(const c of text){
+        const g=font.glyphs[c],stride=Math.ceil(g.w/2);
+        const top=font.height-font.base-g.h-g.y;
+        for(let y=0;y<g.h;y++)for(let x=0;x<g.w;x++){
+          const byte=parseInt(g.bits.slice((y*stride+(x>>1))*2,(y*stride+(x>>1))*2+2),16);
+          const alpha=((x&1)?byte&15:byte>>4)*17;
+          const dx=pen+g.x+x,dy=top+y;
+          if(dx>=0&&dx<canvas.width&&dy>=0&&dy<canvas.height&&alpha)
+            image.data.set([243,245,242,alpha],(dy*canvas.width+dx)*4);
+        }
+        pen+=g.advance;
+      }
+      context.putImageData(image,0,0);
+    }
+    function paintClockBitmap(text,period){
+      const signature=text+'|'+period;
+      if(signature===lastClockSignature)return;
+      lastClockSignature=signature;
+      clockBitmap(clockPixels,clockFonts['88'],text,false);
+      clockBitmap(periodPixels,clockFonts['14_bold'],period,true);
+      if(period){
+        const y=3+inkBottom(clockFonts['88'],text)-inkBottom(clockFonts['14_bold'],period);
+        periodPixels.style.top=periodLabel.style.top=(y/6.4)+'cqw';
+      }
+    }
+    function paintDateBitmap(text){clockBitmap(datePixels,clockFonts['16_bold'],text,false);}
     const petContext = dog.getContext('2d');
     const zoom = root.querySelector('.pet-zoom');
     const zoomContext = zoom.getContext('2d');
@@ -64,8 +103,10 @@
       if(activityLabel.textContent!==caption)activityLabel.textContent=caption;
       dog.dataset.action=name; dog.dataset.frame=String(actionTick%frames.length);
       const [h,m]=timeInput.value.split(':');
-      clock.textContent=hourChoice.checked?String(Number(h)%12||12).padStart(2,'0')+':'+m:timeInput.value||'--:--';
-      periodLabel.textContent=hourChoice.checked?(Number(h)<12?'AM':'PM'):'';
+      const valid=/^\d{2}:\d{2}$/.test(timeInput.value);
+      clock.textContent=valid?(hourChoice.checked?String(Number(h)%12||12).padStart(2,'0')+':'+m:timeInput.value):'--:--';
+      periodLabel.textContent=valid&&hourChoice.checked?(Number(h)<12?'AM':'PM'):'';
+      paintClockBitmap(clock.textContent,periodLabel.textContent);
       paintAudio();
     }
     function advancePet() {

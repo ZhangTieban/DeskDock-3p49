@@ -46,7 +46,16 @@ const preview=process.argv[2];
     clockTop:parseFloat(getComputedStyle(document.querySelector('.dock-clock')).top),
     dateTop:parseFloat(getComputedStyle(document.querySelector('.dock-date')).top)};
  });
- for(const [key,expected] of Object.entries({x:242,y:85,size:14,clockTop:14,dateTop:113.04}))assert(Math.abs(layout[key]-expected)<.1,key);
+ for(const [key,expected] of Object.entries({x:247,y:78,size:14,clockTop:3,dateTop:111}))assert(Math.abs(layout[key]-expected)<.1,key);
+ for(const time of ['00:00','11:11','12:22','18:58','23:59']){
+  await page.locator('input[type=time]').fill(time);
+  const bottoms=await page.evaluate(()=>['.dock-clock-bitmap','.dock-period-bitmap'].map(selector=>{
+   const c=document.querySelector(selector),d=c.getContext('2d').getImageData(0,0,c.width,c.height).data;
+   let last=-1;for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++)if(d[(y*c.width+x)*4+3])last=y;
+   return parseFloat(getComputedStyle(c).top)+last;
+  }));assert(Math.abs(bottoms[0]-bottoms[1])<.1,'AM/PM ink alignment '+time);
+ }
+ await page.locator('input[type=time]').fill('17:30');
  await page.locator('[data-action=heart]').click();
  assert(await dog.evaluate(c=>{const d=c.getContext('2d').getImageData(0,0,296,32).data;for(let i=0;i<d.length;i+=4)if(d[i]===247&&d[i+1]===139&&d[i+2]===166)return true;return false;}));
  await page.screenshot({path:path.join(output,'leash-heart.png')});
@@ -57,6 +66,11 @@ const preview=process.argv[2];
   await page.clock.runFor(data.frames[i].length*80);
  }
  assert.equal(await dog.getAttribute('data-action'),'walk');
+ await page.locator('input[type=time]').fill('');
+ assert.equal(await page.locator('.dock-clock').textContent(),'--:--');
+ assert.equal(await page.locator('.dock-period').textContent(),'');
+ await page.locator('input[type=date]').fill('');
+ assert.equal(await page.locator('.dock-date').textContent(),'---- / -- / --');
  for(const width of [320,736]){
   await page.setViewportSize({width,height:700});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'overflow '+width);
