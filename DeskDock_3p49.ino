@@ -41,6 +41,7 @@ extern "C" {
 #include "ota_config.h"
 #include "settings_policy.h"
 #include "ota_tls_memory.h"
+#include "operation_cue_policy.h"
 
 // The panel and touch driver come from the supplied Waveshare 3.49 example.
 static constexpr int kWidth = 640;
@@ -820,7 +821,7 @@ static bool applyDesiredAudioVolume() {
 static void initAudio() {
   // Configure only the audio pin; the power latch is initialized independently.
   if (!expanderUpdate(0x01, 0x80, 0) || !expanderUpdate(0x03, 0, 0x80)) return;
-  audioI2s.setPins(15, 46, 45, 6, 7);
+  audioI2s.setPins(15, 46, 45, -1, 7); // Cues only need TX, not microphone RX DMA.
   if (!audioI2s.begin(I2S_MODE_STD, 24000, I2S_DATA_BIT_WIDTH_16BIT,
                       I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) return;
   codec = es8311_create(0, ES8311_ADDRESS_0);
@@ -848,14 +849,20 @@ static void audioTick() {
     xSemaphoreGive(codecControlMutex);
     if (muted) Serial.println("[RADIO] Wi-Fi lost: codec muted");
   }
-  if (!audioReady) return;
   const int playing = radioState.load();
   const int local = mp3State.load();
-  if (playing == 1 || playing == 2 || local == 1 || local == 2 || local == 3) {
+  if (deskCueBlocked(playing, local)) {
     beepPending.store(false);
     return;
   }
+  if (!audioReady) return;
   if (audioMutex) xSemaphoreTake(audioMutex, portMAX_DELAY);
+  // The stream owner may have taken I2S while this task waited for the mutex.
+  if (!audioReady || deskCueBlocked(radioState.load(), mp3State.load())) {
+    beepPending.store(false);
+    if (audioMutex) xSemaphoreGive(audioMutex);
+    return;
+  }
   if (appliedVolume.load() != desiredAudioVolume.load()) (void)applyDesiredAudioVolume();
   if (!beepPending.exchange(false) || desiredAudioVolume.load() == 0) {
     if (audioMutex) xSemaphoreGive(audioMutex);
@@ -924,22 +931,21 @@ class RadioI2SOutput : public AudioOutputI2S {
 
   bool pauseOutput() {
     if (!i2sOn || txPaused || i2s_channel_disable(_tx_handle) != ESP_OK) return false;
+    if (i2s_del_channel(_tx_handle) != ESP_OK) return false;
+    _tx_handle = nullptr;
+    i2sOn = false;
     txPaused = true;
     return true;
   }
 
   bool resumeOutput() {
-    if (!txPaused || i2s_channel_enable(_tx_handle) != ESP_OK) return false;
-    txPaused = false;
-    return true;
-  }
-
-  bool stop() override {
-    if (!txPaused) return AudioOutputI2S::stop();
-    // Paused TX is already disabled; it can be deleted directly.
-    if (i2s_del_channel(_tx_handle) != ESP_OK) return false;
-    _tx_handle = nullptr;
-    i2sOn = false;
+    if (!txPaused || !AudioOutputI2S::begin()) return false;
+    // Cues used 24 kHz while paused; the decoder's cached rate did not change.
+    if (!setCodecRate(codecRate)) {
+      AudioOutputI2S::stop();
+      healthy = false;
+      return false;
+    }
     txPaused = false;
     return true;
   }
@@ -981,6 +987,7 @@ static void radioAudioTask(void *) {
   int playingMp3Track = 0;
   uint32_t lastMp3ProgressMs = 0;
   bool driverSwitched = false;
+  uint32_t lastCueRestoreMs = 0;
   uint32_t lastAudioReport = 0;
   uint32_t playingSinceMs = 0, retryAtMs = 0;
   int activeRadioStation = 0, retryStation = 0;
@@ -1005,13 +1012,26 @@ static void radioAudioTask(void *) {
   };
   auto restoreI2s = [&]() {
     if (!driverSwitched) return;
+    lastCueRestoreMs = millis();
     xSemaphoreTake(audioMutex, portMAX_DELAY);
-    audioI2s.setPins(15, 46, 45, 6, 7);
-    audioReady = audioI2s.begin(I2S_MODE_STD, 24000, I2S_DATA_BIT_WIDTH_16BIT,
-                                I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH);
-    if (audioReady) (void)setCodecRate(24000);
+    audioReady.store(false);
+    audioI2s.end(); // Also clean up any previous partial initialization.
+    audioI2s.setPins(15, 46, 45, -1, 7);
+    const bool ready = audioI2s.begin(I2S_MODE_STD, 24000, I2S_DATA_BIT_WIDTH_16BIT,
+                                I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH) && setCodecRate(24000);
+    if (!ready) audioI2s.end();
+    audioReady.store(ready);
+    if (ready) driverSwitched = false;
     xSemaphoreGive(audioMutex);
-    driverSwitched = false;
+    Serial.println(ready ? "[AUDIO] operation cues restored" : "[AUDIO] cue restore failed; will retry");
+  };
+  auto takeStreamI2s = [&]() {
+    if (driverSwitched) return;
+    xSemaphoreTake(audioMutex, portMAX_DELAY);
+    audioReady.store(false);
+    audioI2s.end();
+    driverSwitched = true;
+    xSemaphoreGive(audioMutex);
   };
   for (;;) {
     int command = radioCommand.exchange(-1);
@@ -1020,9 +1040,11 @@ static void radioAudioTask(void *) {
       const int state = mp3State.load();
       if (output && state == (pause ? 2 : 3)) {
         // Merely stopping the decoder leaves old samples cycling in DMA.
+        if (!pause) takeStreamI2s();
         const bool ok = pause ? output->pauseOutput() : output->resumeOutput();
         if (ok) {
           mp3State.store(pause ? 3 : 2);
+          if (pause) restoreI2s();
           Serial.println(pause ? "[MP3] paused" : "[MP3] resumed");
         } else {
           closeStream();
@@ -1114,13 +1136,7 @@ static void radioAudioTask(void *) {
           xSemaphoreGive(mp3RequestMutex);
         }
         if (canStartRadio && deskFontSdMounted() && path[0]) {
-          if (!driverSwitched) {
-            xSemaphoreTake(audioMutex, portMAX_DELAY);
-            audioReady = false;
-            audioI2s.end();
-            driverSwitched = true;
-            xSemaphoreGive(audioMutex);
-          }
+          takeStreamI2s();
           auto *sdSource = new BufferedSdSource(path);
           source = sdSource;
           const uint32_t bufferStarted = millis();
@@ -1163,13 +1179,7 @@ static void radioAudioTask(void *) {
           radioState.store(3);
           Serial.println("[RADIO] HTTP audio URL required");
         } else {
-          if (!driverSwitched) {
-            xSemaphoreTake(audioMutex, portMAX_DELAY);
-            audioReady = false;
-            audioI2s.end();
-            driverSwitched = true;
-            xSemaphoreGive(audioMutex);
-          }
+          takeStreamI2s();
           bool opened = false;
           if (command >= 6) {
             hls = new BestRadioHlsSource();
@@ -1294,6 +1304,9 @@ static void radioAudioTask(void *) {
         }
       }
     }
+    if (deskCueNeedsRestore(driverSwitched,decoder != nullptr,
+                            radioState.load(),mp3State.load()) &&
+        (uint32_t)(millis()-lastCueRestoreMs)>=1000) restoreI2s();
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
@@ -2356,7 +2369,7 @@ static void buildSettings() {
   adjustButton(generalCards[4], "+", 149, 26, changeHomeCarouselInterval, 5, 42, 27);
 
   generalLabel(generalCards[5], "系統與網路", 10, 2, 90);
-  otaStatusLabel = generalLabel(generalCards[5], DESKDOCK_VERSION, 100, 5, 90);
+  otaStatusLabel = generalLabel(generalCards[5], DESKDOCK_VERSION, 100, 2, 90);
   lv_obj_set_style_text_align(otaStatusLabel, LV_TEXT_ALIGN_RIGHT, 0);
   generalButton(generalCards[5], "Wi-Fi", 9, 26, 86, 27, openWifiSettings);
   otaButton = generalButton(generalCards[5], "更新/退版", 105, 26, 86, 27, otaOpenPanel);

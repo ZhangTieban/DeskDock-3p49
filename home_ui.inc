@@ -407,7 +407,7 @@ static void buildHome() {
   lv_obj_clear_flag(homeScreen, LV_OBJ_FLAG_SCROLLABLE);
   homeRule(homeScreen, 307, 8, 1, 156);
 
-  clockLabel = label(homeScreen, "--:--", 8, 3, 298, 88);
+  clockLabel = label(homeScreen, "--:--", 8, 8, 298, 88);
   lv_obj_set_style_text_font(clockLabel, &desk_font_88, 0);
   lv_obj_set_style_text_align(clockLabel, LV_TEXT_ALIGN_CENTER, 0);
   dateLabel = label(homeScreen, "", 11, 111, 286);
