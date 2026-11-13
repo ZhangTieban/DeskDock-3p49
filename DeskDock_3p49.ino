@@ -35,6 +35,7 @@
 #include "es8311.h"
 #include "desk_font.h"
 #include "ota_config.h"
+#include "settings_policy.h"
 
 // The panel and touch driver come from the supplied Waveshare 3.49 example.
 static constexpr int kWidth = 640;
@@ -53,8 +54,7 @@ static constexpr char kTz[] = "CST-8";
 static constexpr int kMaxWifiProfiles = 5;
 static constexpr int kMaxWifiEntries = 14;
 static constexpr int kMaxStocks = 10;
-static constexpr int kWeatherSlots = 3;
-static constexpr int kWeatherMetrics = 11;
+
 static constexpr int kRadioStations = 9;
 static constexpr size_t kRadioBufferBytes = 256 * 1024;
 static const char *kRadioNames[kRadioStations] = {
@@ -96,11 +96,11 @@ static constexpr WeatherPoint kWeatherPoints[] = {
 
 struct Config {
   String ssid, password, stockCode = "2330", customRadioUrl;
-  int counties[kWeatherSlots] = {0, 3, 5};
+  int counties[kWeatherSlots] = {0, 3, 5, 1, 9, 16};
+  int weatherCount = 3;
   int brightness = 75;
   int sleepMinutes = 10;
   int volume = 40;
-  int weatherMain = 0, weatherDetail = 1, weatherThird = 4;
   int carouselSeconds = 10;
   bool carouselPaused = false;
   bool hour12 = false;
@@ -137,10 +137,12 @@ struct PendingSetting {
 static PendingSetting pendingSettings[] = {
   {"bright_ui_v2", 0, false}, {"sleep", 0, false}, {"volume", 0, false},
   {"home_rotate", 0, false}, {"county", 0, false}, {"county1", 0, false},
-  {"county2", 0, false}, {"wx_main", 0, false}, {"wx_detail", 0, false},
-  {"wx_third", 0, false}, {"hour12", 0, true}, {"rotate_pause", 0, true}
+  {"county2", 0, false}, {"county3", 0, false}, {"county4", 0, false},
+  {"county5", 0, false}, {"hour12", 0, true}, {"rotate_pause", 0, true},
+  {"weather_count", 0, false}
 };
 static std::atomic<uint32_t> pendingSettingsMask{0}, settingsChangedAt{0};
+static std::atomic<bool> factoryResetActive{false};
 static std::atomic<bool> ntpSynced{false};
 static std::atomic<bool> beepPending{false};
 static I2SClass audioI2s;
@@ -304,7 +306,8 @@ static lv_obj_t *carouselPauseButton;
 static uint8_t homeCarouselPage = 0;
 static lv_obj_t *homeWeatherIcon, *stockPositionDots[kMaxStocks];
 static lv_obj_t *homeRadioStation, *homeRadioStatus, *homeRadioToggle;
-static lv_obj_t *networkLabel, *wifiList, *weatherPreviewLabels[kWeatherSlots], *stockCodesLabel;
+static lv_obj_t *networkLabel, *wifiList, *stockCodesLabel;
+static lv_obj_t *weatherRegionRows[kWeatherSlots], *weatherCountLabel;
 static lv_obj_t *stockPreviewLabel, *hourModeButton;
 static lv_obj_t *otaButton, *otaStatusLabel;
 static void otaButtonClicked(lv_event_t *);
@@ -417,22 +420,22 @@ static void loadConfig() {
     parseStockCodes(cfg.stockCode);
   }
   cfg.customRadioUrl = prefs.getString("radio_url", "");
-  cfg.counties[0] = constrain(prefs.getInt("county", 0), 0, kCountyCount - 1);
-  cfg.counties[1] = constrain(prefs.getInt("county1", cfg.counties[0] == 3 ? 0 : 3),
-                              0, kCountyCount - 1);
-  cfg.counties[2] = constrain(prefs.getInt("county2", cfg.counties[0] == 5 ? 0 : 5),
-                              0, kCountyCount - 1);
+  cfg.weatherCount = deskWeatherCount(prefs.getInt("weather_count", 3));
+  for (int slot=0; slot<kWeatherSlots; ++slot) {
+    const String key = slot ? String("county")+slot : String("county");
+    int fallback=cfg.counties[slot];
+    if (slot==1 && cfg.counties[0]==3) fallback=0;
+    if (slot==2 && cfg.counties[0]==5) fallback=0;
+    cfg.counties[slot] = constrain(prefs.getInt(key.c_str(),fallback),0,kCountyCount-1);
+  }
   const int savedBrightness = prefs.getInt("bright_ui_v2", -1);
   const int oldBrightness = constrain(prefs.getInt("bright", 75), 0, 100);
   cfg.brightness = savedBrightness >= 0 ? constrain(savedBrightness, 0, 100) :
-                   constrain(((oldBrightness - 15) * 100 + 42) / 85, 0, 100);
+      prefs.isKey("bright") ? constrain(((oldBrightness - 15) * 100 + 42) / 85, 0, 100) : 75;
   cfg.sleepMinutes = constrain(prefs.getInt("sleep", 10), 0, 60);
   cfg.volume = constrain(prefs.getInt("volume", 40), 0, 100);
   desiredAudioVolume.store(cfg.volume);
   cfg.hour12 = prefs.getBool("hour12", false);
-  cfg.weatherMain = constrain(prefs.getInt("wx_main", 0), 0, kWeatherMetrics - 1);
-  cfg.weatherDetail = constrain(prefs.getInt("wx_detail", 1), 0, kWeatherMetrics - 1);
-  cfg.weatherThird = constrain(prefs.getInt("wx_third", 4), 0, kWeatherMetrics - 1);
   cfg.carouselSeconds = constrain(prefs.getInt("home_rotate", 10), 5, 60);
   cfg.carouselPaused = prefs.getBool("rotate_pause", false);
   cfg.batteryMode = constrain(prefs.getInt("batt_mode2", 2), 0, 3);
@@ -1898,7 +1901,7 @@ static void toggleHomeCarouselPause(lv_event_t *) {
 }
 static void changeCounty(lv_event_t *event) {
   const uint8_t slot = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
-  if (slot >= kWeatherSlots) return;
+  if (slot >= cfg.weatherCount) return;
   cfg.counties[slot] = lv_dropdown_get_selected((lv_obj_t *)lv_event_get_target(event));
   weatherData[slot] = WeatherData();
   weatherData[slot].summary = "更新中...";
@@ -1909,15 +1912,23 @@ static void changeCounty(lv_event_t *event) {
   if (networkTaskHandle) xTaskNotify(networkTaskHandle, kFetchWeather, eSetBits);
   lastInputMs = millis();
 }
-static void changeWeatherDisplay(lv_event_t *event) {
-  const int field = (uintptr_t)lv_event_get_user_data(event);
-  const int selected = lv_dropdown_get_selected((lv_obj_t *)lv_event_get_target(event));
-  if (field == 0) cfg.weatherMain = selected;
-  else if (field == 1) cfg.weatherDetail = selected;
-  else cfg.weatherThird = selected;
-  deferSetting(7 + field, selected);
-  if (networkTaskHandle) xTaskNotify(networkTaskHandle, kFetchWeather, eSetBits);
-  lastInputMs = millis();
+static void refreshWeatherRegionControls() {
+  if (weatherCountLabel) lv_label_set_text_fmt(weatherCountLabel,"%d 個",cfg.weatherCount);
+  for (int slot=0; slot<kWeatherSlots; ++slot) {
+    if (!weatherRegionRows[slot]) continue;
+    if (slot<cfg.weatherCount) lv_obj_remove_flag(weatherRegionRows[slot],LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(weatherRegionRows[slot],LV_OBJ_FLAG_HIDDEN);
+  }
+}
+static void changeWeatherCount(lv_event_t *event) {
+  const int next=deskWeatherCount(cfg.weatherCount+(int)(intptr_t)lv_event_get_user_data(event));
+  if (next==cfg.weatherCount) return;
+  cfg.weatherCount=next;
+  if (weatherSlot>=next) weatherSlot=0;
+  refreshWeatherRegionControls();
+  deferSetting(12,next);
+  lastWeatherFlip=lastWeatherAttempt=lastInputMs=millis();
+  if (networkTaskHandle) xTaskNotify(networkTaskHandle,kFetchWeather,eSetBits);
 }
 static void changeHourMode(lv_event_t *) {
   cfg.hour12 = !cfg.hour12;
@@ -2318,41 +2329,33 @@ static void buildSettings() {
     if (i) options += '\n';
     options += kCounties[i];
   }
-  static const char *metricOptions =
-      "高低溫\n降雨機率\n目前溫度\n體感溫度\n濕度\n風速\n雲量\n紫外線\n降雨量\n日出\n日落";
-  label(weather, "主", 20, 10, 28);
-  label(weather, "副", 205, 10, 28);
-  label(weather, "三", 390, 10, 28);
-  for (int field = 0; field < 3; ++field) {
-    lv_obj_t *metric = lv_dropdown_create(weather);
-    lv_obj_set_pos(metric, 50 + field * 185, 4);
-    lv_obj_set_size(metric, 145, 34);
-    lv_obj_set_style_bg_color(metric, lv_color_hex(0x202824), 0);
-    lv_obj_set_style_text_color(metric, lv_color_hex(0xF3F5F2), 0);
-    lv_obj_set_style_border_color(metric, lv_color_hex(0x34433B), 0);
-    lv_dropdown_set_options(metric, metricOptions);
-    lv_dropdown_set_selected(metric, field == 0 ? cfg.weatherMain :
-                                      field == 1 ? cfg.weatherDetail : cfg.weatherThird);
-    lv_obj_add_event_cb(metric, changeWeatherDisplay, LV_EVENT_VALUE_CHANGED,
-                        (void *)(uintptr_t)field);
+  label(weather,"地區數量",20,9,90);
+  adjustButton(weather,"-",116,2,changeWeatherCount,-1,36,32);
+  weatherCountLabel=label(weather,"",162,9,50);
+  adjustButton(weather,"+",222,2,changeWeatherCount,1,36,32);
+  button(weather,"更新",532,2,86,32,refreshWeatherNow);
+  const int settingsColumnX[3] = {20,226,432};
+  for (int slot=0; slot<kWeatherSlots; ++slot) {
+    lv_obj_t *row=lv_obj_create(weather);
+    weatherRegionRows[slot]=row;
+    lv_obj_set_pos(row,settingsColumnX[slot%3],40+(slot/3)*44);
+    lv_obj_set_size(row,186,34);
+    lv_obj_set_style_pad_all(row,0,0);
+    lv_obj_set_style_border_width(row,0,0);
+    lv_obj_set_style_bg_opa(row,LV_OPA_TRANSP,0);
+    lv_obj_remove_flag(row,LV_OBJ_FLAG_SCROLLABLE);
+    char number[4];snprintf(number,sizeof(number),"%d",slot+1);
+    label(row,number,0,7,20);
+    lv_obj_t *county=lv_dropdown_create(row);
+    lv_obj_set_pos(county,24,0);lv_obj_set_size(county,162,34);
+    lv_obj_set_style_bg_color(county,lv_color_hex(0x202824),0);
+    lv_obj_set_style_text_color(county,lv_color_hex(0xF3F5F2),0);
+    lv_obj_set_style_border_color(county,lv_color_hex(0x34433B),0);
+    lv_dropdown_set_options(county,options.c_str());
+    lv_dropdown_set_selected(county,cfg.counties[slot]);
+    lv_obj_add_event_cb(county,changeCounty,LV_EVENT_VALUE_CHANGED,(void *)(uintptr_t)slot);
   }
-  button(weather, "更新", 575, 4, 52, 34, refreshWeatherNow);
-  static const char *slotNames[kWeatherSlots] = {"地點 1", "地點 2", "地點 3"};
-  const int settingsColumnX[3] = {20, 226, 432};
-  for (int slot = 0; slot < kWeatherSlots; ++slot) {
-    const int x = settingsColumnX[slot];
-    label(weather, slotNames[slot], x, 43, 92);
-    lv_obj_t *county = lv_dropdown_create(weather);
-    lv_obj_set_pos(county, x, 65); lv_obj_set_size(county, 186, 36);
-    lv_obj_set_style_bg_color(county, lv_color_hex(0x202824), 0);
-    lv_obj_set_style_text_color(county, lv_color_hex(0xF3F5F2), 0);
-    lv_obj_set_style_border_color(county, lv_color_hex(0x34433B), 0);
-    lv_dropdown_set_options(county, options.c_str());
-    lv_dropdown_set_selected(county, cfg.counties[slot]);
-    lv_obj_add_event_cb(county, changeCounty, LV_EVENT_VALUE_CHANGED,
-                        (void *)(uintptr_t)slot);
-    weatherPreviewLabels[slot] = label(weather, "等待天氣", x, 103, 186);
-  }
+  refreshWeatherRegionControls();
 
   label(stocks, "已選代號", 20, 9, 95);
   stockCodesLabel = label(stocks, cfg.stockCode.c_str(), 125, 9, 490);
@@ -2951,12 +2954,13 @@ static void networkTask(void *) {
     if (requests & kFetchWeather) {
       for (int slot = 0; slot < kWeatherSlots && WiFi.status() == WL_CONNECTED; ++slot) {
         while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
+        if (slot>=cfg.weatherCount) { lvgl_port_unlock(); break; }
         const int county = cfg.counties[slot];
         lvgl_port_unlock();
         WeatherData result;
         const bool valid = fetchWeather(result, county);
         while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
-        const bool current = cfg.counties[slot] == county;
+        const bool current = slot<cfg.weatherCount && cfg.counties[slot] == county;
         if (current && (valid || weatherData[slot].stamp.isEmpty())) {
           weatherData[slot] = result;
         }
@@ -3145,14 +3149,6 @@ static void refreshUi() {
       wifiAttempt >= 0 ? "連線中 " + wifiProfiles[wifiAttempt].ssid : "未連線";
     homeSetText(networkLabel, status);
   }
-  for (int slot = 0; slot < kWeatherSlots; ++slot) {
-    if (!weatherPreviewLabels[slot]) continue;
-    const WeatherData &item = weatherData[slot];
-    const String preview = item.valid ?
-        String(item.low) + "-" + item.high + "°C  降雨" + item.rain + "%" :
-        item.summary;
-    homeSetText(weatherPreviewLabels[slot], preview);
-  }
   if (stockPreviewLabel && std::strcmp(lv_label_get_text(stockPreviewLabel),
                                        remote.index.c_str()) != 0)
     lv_label_set_text(stockPreviewLabel, remote.index.c_str());
@@ -3257,6 +3253,7 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
+  if (factoryResetActive.load()) { delay(20); return; }
   pollPhysicalButton(powerButton, now, true);
   pollPhysicalButton(settingsButton, now, false);
   if (powerOffRequested) {

@@ -17,13 +17,13 @@ TEXT = (
     "彰化投雲嘉義屏東宜蘭花蓮東澎湖金門江連馬祖轉圈"
     "測版號今明小時週日一二三四五六"
     "價或林灣示與象顯／：搜尋優刪除記憶需開文字放英數空白有符重大夜盤充個不足月"
-    "再室"  # Keep previously bundled glyphs for dynamic filenames and labels.
+    "主出副外紫點再室"  # Keep previously bundled glyphs for dynamic filenames and labels.
 )
 ASCII = "".join(chr(i) for i in range(32, 127))
 SOURCE_UNICODE = "".join(
     char for path in (ROOT / "DeskDock_3p49.ino", ROOT / "home_ui.inc",
                       ROOT / "ota_update.inc", ROOT / "ota_rollback_core.inc",
-                      ROOT / "ota_rollback_ui.inc")
+                      ROOT / "ota_rollback_ui.inc", ROOT / "factory_reset_ui.inc")
     for char in path.read_text(encoding="utf-8")
     if ord(char) >= 0xA0
 )

@@ -18,6 +18,7 @@ git clone https://github.com/ZhangTieban/DeskDock-3p49.git DeskDock_3p49
 cd DeskDock_3p49
 # 安裝上述固定版本的 ESP8266Audio 後，先套用與 CI 相同的邊界修正：
 python3 tools/patch_audio_library.py --library-dir "$(arduino-cli config get directories.user)/libraries/ESP8266Audio"
+python3 tools/patch_esp32_core.py --core-dir "$(arduino-cli config get directories.data)/packages/esp32/hardware/esp32/3.3.7"
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=huge_app' \
   --build-path build-ci .
@@ -57,3 +58,11 @@ BOOT（GPIO0）短按切換首頁與設定頁；GPIO16 電源鍵按住約 5 秒�
 
 Wi-Fi 密碼與設定存在裝置 NVS，原始碼與 Release 不包含使用者憑證。
 天氣與股票資料依各來源的可用性更新；網路電台串流網址可能隨電台變動。
+
+## 地區與初始設定（0.2.06）
+
+天氣頁以「地區數量」設定 1～6 個地點，預設沿用三個地點；啟用地點才查詢並參與首頁輪播。縮減數量保留未啟用地點的選擇，方便再增加。原本未連動首頁的主／副／三選單已移除，首頁天氣資訊維持原排版。
+
+「一般 → 更新/退版 → 系統設定」新增「回到初始設定」。確認後停止音訊，清除 Wi-Fi、天氣、股票、亮度、音量、時間格式與輪播設定，再重新啟動。保留目前 app、前版分區、SD 字庫、MP3 與硬體 RTC；不格式化 SD、不抹除整片 Flash。OTA 或退版忙碌、首次啟動驗證中不允許重設。
+
+Arduino ESP32 3.3.7 的 DNS 快取清除會同步呼叫待完成的 DNS/SNTP 回呼；電台首次解析網址可能在錯誤執行緒觸發 TCP/IP 核心鎖斷言。`tools/patch_esp32_core.py` 只為快取清除加上核心鎖，保留原有鎖所有權，阻塞式連線仍在鎖外。本機與發布 CI 使用相同固定版本修補；不關閉 SDK 執行緒檢查。

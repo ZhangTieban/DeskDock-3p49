@@ -338,7 +338,7 @@ static void refreshHomeRows(uint32_t now) {
   const uint32_t rotateMs = (uint32_t)cfg.carouselSeconds * 1000UL;
   if (!cfg.carouselPaused && homeCarouselPage == 0 &&
       (uint32_t)(now - lastWeatherFlip) >= rotateMs) {
-    weatherSlot = (weatherSlot + 1) % kWeatherSlots;
+    weatherSlot = (weatherSlot + 1) % cfg.weatherCount;
     lastWeatherFlip = now;
   }
   setWeatherPage(weatherPageA);

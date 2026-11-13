@@ -2,8 +2,11 @@ static lv_obj_t *otaPanel = nullptr, *otaInstallButton = nullptr;
 static lv_obj_t *otaPanelStatusLabel = nullptr, *rollbackStatusLabel = nullptr;
 static lv_obj_t *rollbackButton = nullptr, *rollbackScanButton = nullptr, *otaBackButton = nullptr;
 static lv_obj_t *rollbackBootLabel = nullptr, *rollbackDialog = nullptr;
+static lv_obj_t *factoryDialog=nullptr, *factoryResetButton=nullptr, *factoryResetStatusLabel=nullptr;
+static void factoryAsk(lv_event_t *);
+static void factoryCloseDialog(lv_event_t *);
 
-static bool otaRollbackDialogOpen() { return rollbackDialog != nullptr; }
+static bool otaRollbackDialogOpen() { return rollbackDialog != nullptr || factoryDialog != nullptr; }
 
 static void rollbackCloseDialog(lv_event_t *) {
   if (!rollbackDialog) return;
@@ -14,6 +17,7 @@ static void rollbackCloseDialog(lv_event_t *) {
 static bool otaNavigateAway() {
   if (otaBusy.load()) return false;
   rollbackCloseDialog(nullptr);
+  factoryCloseDialog(nullptr);
   return true;
 }
 
@@ -27,7 +31,7 @@ static void rollbackStart(bool execute) {
   }
 }
 static void rollbackScanClicked(lv_event_t *) {
-  if (rollbackDialog) return;
+  if (otaRollbackDialogOpen()) return;
   rollbackStart(false);
 }
 
@@ -38,7 +42,7 @@ static void rollbackConfirmClicked(lv_event_t *) {
 }
 
 static void rollbackAsk(lv_event_t *) {
-  if (rollbackDialog || otaBusy.load() || rollbackStage.load() != RollbackStage::Ready) return;
+  if (otaRollbackDialogOpen() || otaBusy.load() || rollbackStage.load() != RollbackStage::Ready) return;
   rollbackRequested = rollbackTarget;
   rollbackDialog = lv_obj_create(otaPanel);
   lv_obj_set_pos(rollbackDialog,0,0); lv_obj_set_size(rollbackDialog,640,172);
@@ -91,22 +95,28 @@ static void otaOpenPanel(lv_event_t *) {
     lv_obj_set_style_pad_all(otaPanel,0,0);
     lv_obj_set_style_border_width(otaPanel,0,0);
     lv_obj_remove_flag(otaPanel,LV_OBJ_FLAG_SCROLLABLE);
-    generalLabel(otaPanel,"系統更新",12,7,150);
+    generalLabel(otaPanel,"系統設定",12,7,150);
     char text[64]; snprintf(text,sizeof(text),"目前 %s",DESKDOCK_VERSION);
     generalLabel(otaPanel,text,168,7,160);
     rollbackBootLabel = label(otaPanel,"",328,11,208);
     lv_obj_set_style_text_font(rollbackBootLabel,&desk_font_10_bold,0);
     otaBackButton = generalButton(otaPanel,"返回一般",540,4,88,32,otaPanelBack);
-    lv_obj_t *update = otaPanelCard(12,294);
-    generalLabel(update,"韌體更新",10,5,274);
-    otaPanelStatusLabel = generalLabel(update,"",10,33,274);
-    otaInstallButton = generalButton(update,"檢查更新",10,77,274,33,otaButtonClicked);
-    lv_obj_t *previous = otaPanelCard(318,310);
-    generalLabel(previous,"退回前一版",10,5,170);
-    rollbackScanButton = generalButton(previous,"重查前版",182,2,118,27,rollbackScanClicked);
-    rollbackStatusLabel = generalLabel(previous,"尚未檢查",10,33,290);
+    lv_obj_t *update = otaPanelCard(12,196);
+    generalLabel(update,"韌體更新",10,5,176);
+    otaPanelStatusLabel = generalLabel(update,"",10,33,176);
+    lv_label_set_long_mode(otaPanelStatusLabel,LV_LABEL_LONG_WRAP);
+    otaInstallButton = generalButton(update,"檢查更新",10,77,176,33,otaButtonClicked);
+    lv_obj_t *previous = otaPanelCard(220,196);
+    generalLabel(previous,"退回前一版",10,5,100);
+    rollbackScanButton = generalButton(previous,"重查",120,2,66,27,rollbackScanClicked);
+    rollbackStatusLabel = generalLabel(previous,"尚未檢查",10,33,176);
     lv_label_set_long_mode(rollbackStatusLabel,LV_LABEL_LONG_WRAP);
-    rollbackButton = generalButton(previous,"退回前一版",10,77,290,33,rollbackAsk);
+    rollbackButton = generalButton(previous,"退回前一版",10,77,176,33,rollbackAsk);
+    lv_obj_t *initial = otaPanelCard(428,200);
+    generalLabel(initial,"回到初始設定",10,5,180);
+    factoryResetStatusLabel=generalLabel(initial,"清除設定與 Wi-Fi",10,33,180);
+    lv_label_set_long_mode(factoryResetStatusLabel,LV_LABEL_LONG_WRAP);
+    factoryResetButton=generalButton(initial,"回到初始設定",10,77,180,33,factoryAsk);
   }
   lv_screen_load(otaPanel);
   if (!otaBusy.load()) rollbackStart(false);
@@ -120,7 +130,10 @@ static void otaControlEnabled(lv_obj_t *control,bool enabled) {
   else lv_obj_add_state(control,LV_STATE_DISABLED);
 }
 
+#include "factory_reset_ui.inc"
+
 static void refreshRollbackUi() {
+  refreshFactoryResetUi();
   if (!rollbackStatusLabel) return;
   const RollbackStage stage = rollbackStage.load();
   const bool busy = otaBusy.load();
@@ -145,9 +158,9 @@ static void refreshRollbackUi() {
     case RollbackStage::Rebooting: strcpy(text,"前版已選定，正在重新啟動..."); break;
   }
   if (strcmp(lv_label_get_text(rollbackStatusLabel),text)) lv_label_set_text(rollbackStatusLabel,text);
-  otaControlEnabled(rollbackButton,!busy && stage == RollbackStage::Ready);
-  otaControlEnabled(rollbackScanButton,!busy && !rollbackDialog);
-  otaControlEnabled(otaInstallButton,!busy && !rollbackDialog);
+  otaControlEnabled(rollbackButton,!busy && !otaRollbackDialogOpen() && stage == RollbackStage::Ready);
+  otaControlEnabled(rollbackScanButton,!busy && !otaRollbackDialogOpen());
+  otaControlEnabled(otaInstallButton,!busy && !otaRollbackDialogOpen());
   otaControlEnabled(otaBackButton,!busy);
   switch (rollbackBoot.load()) {
     case RollbackBoot::Waiting: strcpy(text,"退版啟動確認中"); break;
