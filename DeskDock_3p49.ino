@@ -225,6 +225,7 @@ static int wifiProfileCount = 0, wifiEntryCount = 0, wifiAttempt = -1;
 static uint32_t wifiAttemptMs = 0;
 static bool wifiScanPending = false, wifiListDirty = true, wifiWasConnected = false;
 static String selectedWifiSsid;
+static std::atomic<uint32_t> pendingWifiInput[kMaxWifiEntries];
 static String wifiCandidateSsid, wifiCandidatePassword, wifiBadSsid;
 static bool wifiCandidateActive = false, wifiHold = false;
 static bool wifiTransientFailure = false;
@@ -1788,6 +1789,21 @@ static void connectWifi(lv_event_t *) {
   lastInputMs = millis();
 }
 
+static void traceWifiInput(lv_event_t *event) {
+  const unsigned index=(uintptr_t)lv_event_get_user_data(event);
+  if(index>=kMaxWifiEntries) return;
+  uint32_t bits=0;
+  switch(lv_event_get_code(event)) {
+    case LV_EVENT_PRESSED: bits=1;break;
+    case LV_EVENT_RELEASED: bits=2;break;
+    case LV_EVENT_CLICKED: bits=4;break;
+    case LV_EVENT_PRESS_LOST: bits=8;break;
+    case LV_EVENT_SCROLL_BEGIN: bits=16;break;
+    default:return;
+  }
+  if(lv_indev_active() && lv_indev_get_scroll_obj(lv_indev_active())) bits|=32;
+  pendingWifiInput[index].fetch_or(bits);
+}
 static void wifiEntryClicked(lv_event_t *event) {
   const int index = (int)(intptr_t)lv_event_get_user_data(event);
   if (index < 0 || index >= wifiEntryCount) return;
@@ -1868,6 +1884,7 @@ static void rebuildWifiList() {
     lv_obj_t *statusLabel = label(row, status, 453, 5, 84);
     lv_obj_set_style_text_align(statusLabel, LV_TEXT_ALIGN_RIGHT, 0);
     // CLICKED is suppressed after a drag; PRESSED interrupts list scrolling.
+    lv_obj_add_event_cb(row, traceWifiInput, LV_EVENT_ALL, (void *)(intptr_t)i);
     lv_obj_add_event_cb(row, buttonCue, LV_EVENT_CLICKED, nullptr);
     lv_obj_add_event_cb(row, wifiEntryClicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
   }
@@ -2151,6 +2168,10 @@ static void settingsIoTask(void *) {
   uint32_t lastTouchReport = 0;
   for (;;) {
     if (mp3ScanRequested.exchange(false)) scanMp3InBackground();
+    for(unsigned i=0;i<kMaxWifiEntries;++i) {
+      const uint32_t bits=pendingWifiInput[i].exchange(0);
+      if(bits)Serial.printf("[WIFI INPUT] row=%u bits=%lu\n",i,(unsigned long)bits);
+    }
     flushPendingSettings();
     const uint32_t report = pendingTouchReport.exchange(0);
     if (report) {
