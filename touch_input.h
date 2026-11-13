@@ -51,6 +51,21 @@ static DESK_TOUCH_FN desk_touch_sample_t desk_touch_update(desk_touch_filter_t *
   return result;
 }
 
+// AXS15231B sends a one-shot UP event (1) with the point count still 1.
+// It must release a qualified contact without waiting for two zero-count frames.
+static DESK_TOUCH_FN desk_touch_sample_t desk_touch_update_report(desk_touch_filter_t *f,
+    uint32_t now,bool read_ok,uint8_t count,uint8_t event,bool coordinates_valid,
+    int16_t x,int16_t y) {
+  if (read_ok && coordinates_valid && count==1 && event==1) {
+    f->pressed=false;f->down_count=0;f->up_count=0;
+    desk_touch_sample_t up={0};
+    up.time_ms=now;up.x=f->x;up.y=f->y;
+    return up;
+  }
+  const bool contact=read_ok && coordinates_valid && count==1;
+  return desk_touch_update(f,now,contact,read_ok && count==0,x,y);
+}
+
 #define DESK_TOUCH_QUEUE_CAPACITY 32
 typedef struct {
   desk_touch_sample_t events[DESK_TOUCH_QUEUE_CAPACITY],latest;

@@ -2151,11 +2151,6 @@ static void settingsIoTask(void *) {
   uint32_t lastTouchReport = 0;
   for (;;) {
     if (mp3ScanRequested.exchange(false)) scanMp3InBackground();
-    desk_touch_trace_t trace;
-    for(int n=0;n<4 && lvgl_port_take_touch_trace(&trace);++n)
-      Serial.printf("[TOUCH RAW] kind=%u count=%u event=%u xy=%u,%u pressed=%u cancel=%u error=%ld ages=%ld,%ld\n",
-        trace.kind,trace.count,trace.event,trace.x,trace.y,trace.pressed,trace.cancel,
-        (long)trace.error,(long)trace.head_age,(long)trace.latest_age);
     flushPendingSettings();
     const uint32_t report = pendingTouchReport.exchange(0);
     if (report) {

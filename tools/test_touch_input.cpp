@@ -90,4 +90,32 @@ constexpr bool producer_preempts_time_snapshot() {
   return next.pressed && !next.cancel;
 }
 static_assert(producer_preempts_time_snapshot(),"new press/release must not be cancelled as stale");
+constexpr bool axs_up_report_replay() {
+  desk_touch_filter_t f{};
+  desk_touch_queue_t q{};
+  if(desk_touch_update_report(&f,0,true,1,2,true,10,20).pressed)return false;
+  auto down=desk_touch_update_report(&f,10,true,1,2,true,10,20);
+  if(!down.pressed)return false;
+  desk_touch_push(&q,down);
+  // Idle/malformed reports are not evidence of lifting the finger.
+  if(!desk_touch_update_report(&f,20,true,25,0,false,2329,2329).pressed)return false;
+  // Actual captured UP: count 1, event 1. Preserve the last contact position.
+  auto up=desk_touch_update_report(&f,30,true,1,1,true,16,24);
+  if(up.pressed || up.cancel || up.x!=10 || up.y!=20)return false;
+  desk_touch_push(&q,up);
+  auto a=desk_touch_pop(&q,40),b=desk_touch_pop(&q,40);
+  return a.pressed && !b.pressed && !b.cancel;
+}
+constexpr bool invalid_up_reports_do_not_click() {
+  desk_touch_filter_t f{};
+  desk_touch_update_report(&f,0,true,1,2,true,10,20);
+  desk_touch_update_report(&f,10,true,1,2,true,10,20);
+  if(!desk_touch_update_report(&f,20,false,1,1,true,10,20).pressed)return false;
+  if(!desk_touch_update_report(&f,30,true,2,1,true,10,20).pressed)return false;
+  if(!desk_touch_update_report(&f,40,true,1,1,false,4095,4095).pressed)return false;
+  auto lost=desk_touch_update_report(&f,160,false,0,0,false,0,0);
+  return !lost.pressed && lost.cancel;
+}
+static_assert(axs_up_report_replay(),"captured AXS one-shot UP must reach the UI as a release");
+static_assert(invalid_up_reports_do_not_click(),"failed/malformed UP reports retain cancellation safety");
 int main() { return 0; }

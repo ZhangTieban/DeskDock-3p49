@@ -185,20 +185,6 @@ static void example_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uin
 static portMUX_TYPE touch_mux=portMUX_INITIALIZER_UNLOCKED;
 static desk_touch_queue_t touch_queue;
 static uint32_t touch_reads,touch_errors,touch_recoveries;
-static desk_touch_trace_t touch_raw_trace,touch_traces[32];
-static uint8_t touch_trace_head,touch_trace_count;
-static void push_touch_trace(desk_touch_trace_t trace) {
-  if(touch_trace_count==32)return;
-  touch_traces[(touch_trace_head+touch_trace_count)%32]=trace;
-  ++touch_trace_count;
-}
-bool lvgl_port_take_touch_trace(desk_touch_trace_t *trace) {
-  portENTER_CRITICAL(&touch_mux);
-  const bool ready=touch_trace_count>0;
-  if(ready){*trace=touch_traces[touch_trace_head];touch_trace_head=(touch_trace_head+1)%32;--touch_trace_count;}
-  portEXIT_CRITICAL(&touch_mux);
-  return ready;
-}
 
 void lvgl_port_cancel_pending_touch(void) {
   portENTER_CRITICAL(&touch_mux);
@@ -223,15 +209,10 @@ static void touch_sample_task(void *arg) {
     const uint32_t now=(uint32_t)(esp_timer_get_time()/1000);
     const uint16_t raw_x=((uint16_t)(bytes[2]&15)<<8)|bytes[3];
     const uint16_t raw_y=((uint16_t)(bytes[4]&15)<<8)|bytes[5];
-    const bool contact=error==ESP_OK && bytes[1]==1 && raw_x<EXAMPLE_LCD_V_RES && raw_y<EXAMPLE_LCD_H_RES;
-    const bool was_pressed=filter.pressed;
-    const desk_touch_sample_t sample=desk_touch_update(&filter,now,contact,
-        error==ESP_OK && bytes[1]==0,raw_y,EXAMPLE_LCD_V_RES-1-raw_x);
+    const desk_touch_sample_t sample=desk_touch_update_report(&filter,now,error==ESP_OK,
+        bytes[1],bytes[2]>>6,raw_x<EXAMPLE_LCD_V_RES && raw_y<EXAMPLE_LCD_H_RES,
+        raw_y,EXAMPLE_LCD_V_RES-1-raw_x);
     portENTER_CRITICAL(&touch_mux);
-    touch_raw_trace=(desk_touch_trace_t){.time_ms=now,.error=error,.x=raw_x,.y=raw_y,
-      .count=bytes[1],.event=bytes[2]>>6,.pressed=sample.pressed,.cancel=sample.cancel,.kind=1};
-    if(was_pressed!=sample.pressed || sample.cancel ||
-       (was_pressed && (!contact || (bytes[2]>>6)==1)))push_touch_trace(touch_raw_trace);
     ++touch_reads;if(error!=ESP_OK)++touch_errors;
     desk_touch_push(&touch_queue,sample);
     portEXIT_CRITICAL(&touch_mux);
@@ -259,15 +240,7 @@ static void TouchInputReadCallback(lv_indev_t *indev,lv_indev_data_t *data) {
   portENTER_CRITICAL(&touch_mux);
   // The higher-priority sampler must not publish a timestamp newer than now.
   const uint32_t now=(uint32_t)(esp_timer_get_time()/1000);
-  const bool queued_cancel=touch_queue.count && touch_queue.events[touch_queue.head].cancel;
-  const int32_t head_age=touch_queue.count?(int32_t)(now-touch_queue.events[touch_queue.head].time_ms):0;
-  const int32_t latest_age=(int32_t)(now-touch_queue.latest.time_ms);
   const desk_touch_sample_t sample=desk_touch_pop(&touch_queue,now);
-  if(sample.cancel && !queued_cancel){
-    desk_touch_trace_t trace=touch_raw_trace;trace.kind=2;
-    trace.head_age=head_age;trace.latest_age=latest_age;
-    push_touch_trace(trace);
-  }
   const bool more=touch_queue.count>0;
   portEXIT_CRITICAL(&touch_mux);
   if (sample.cancel) lv_indev_reset(indev,NULL);
