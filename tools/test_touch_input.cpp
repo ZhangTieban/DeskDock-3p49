@@ -75,4 +75,19 @@ static_assert(movement_and_wrap(),"coordinate noise and clock wrap");
 static_assert(queue_tap_and_drag(),"queued tap/drag ordering");
 static_assert(cancellations(),"modal, held touch and stale input cancellation");
 static_assert(overflow_and_wrap_queue(),"overflow cancellation and clock wrap");
+constexpr bool producer_preempts_time_snapshot() {
+  desk_touch_queue_t q{};
+  desk_touch_push(&q,{10,20,true,false,100});
+  auto down=desk_touch_pop(&q,99);
+  if (!down.pressed || down.cancel) return false;
+  desk_touch_push(&q,{10,20,false,false,111});
+  auto up=desk_touch_pop(&q,110);
+  if (up.pressed || up.cancel) return false;
+  // The same ordering can straddle the millisecond counter wrap.
+  desk_touch_queue_t wrap{};
+  desk_touch_push(&wrap,{10,20,true,false,0});
+  auto next=desk_touch_pop(&wrap,0xffffffffu);
+  return next.pressed && !next.cancel;
+}
+static_assert(producer_preempts_time_snapshot(),"new press/release must not be cancelled as stale");
 int main() { return 0; }

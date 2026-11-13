@@ -86,8 +86,10 @@ static DESK_TOUCH_FN void desk_touch_push(desk_touch_queue_t *q,desk_touch_sampl
   q->latest=sample;q->latest.cancel=false;
 }
 static DESK_TOUCH_FN desk_touch_sample_t desk_touch_pop(desk_touch_queue_t *q,uint32_t now) {
-  if ((q->count && (uint32_t)(now-q->events[q->head].time_ms)>300) ||
-      (q->latest.pressed && (uint32_t)(now-q->latest.time_ms)>=150)) {
+  // A sample published just after the caller's time snapshot has negative age,
+  // not a huge timeout. Signed differences also preserve uint32 clock wrap.
+  if ((q->count && (int32_t)(now-q->events[q->head].time_ms)>300) ||
+      (q->latest.pressed && (int32_t)(now-q->latest.time_ms)>=150)) {
     desk_touch_cancel_queue(q);
     q->events[0].time_ms=now;
   }

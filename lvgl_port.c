@@ -237,8 +237,9 @@ static void TouchInputReadCallback(lv_indev_t *indev,lv_indev_data_t *data) {
     previous_screen=lv_screen_active();
     lvgl_port_cancel_pending_touch();
   }
-  const uint32_t now=(uint32_t)(esp_timer_get_time()/1000);
   portENTER_CRITICAL(&touch_mux);
+  // The higher-priority sampler must not publish a timestamp newer than now.
+  const uint32_t now=(uint32_t)(esp_timer_get_time()/1000);
   const desk_touch_sample_t sample=desk_touch_pop(&touch_queue,now);
   const bool more=touch_queue.count>0;
   portEXIT_CRITICAL(&touch_mux);
