@@ -313,6 +313,9 @@ static lv_obj_t *homeWeatherIcon, *stockPositionDots[kMaxStocks];
 static lv_obj_t *homeRadioStation, *homeRadioStatus, *homeRadioToggle;
 static lv_obj_t *networkLabel, *wifiList, *stockCodesLabel;
 static lv_obj_t *weatherRegionRows[kWeatherSlots], *weatherCountLabel;
+static lv_obj_t *weatherRegionButtons[kWeatherSlots], *weatherCityScreen, *weatherCityTitle;
+static lv_obj_t *weatherCityButtons[kCountyCount];
+static uint8_t weatherCitySlot = 0;
 static lv_obj_t *stockPreviewLabel, *hourModeButton;
 static lv_obj_t *otaButton, *otaStatusLabel;
 static void otaButtonClicked(lv_event_t *);
@@ -1906,10 +1909,11 @@ static void toggleHomeCarouselPause(lv_event_t *) {
   lastInputMs = lastWeatherFlip = lastFooterFlip = millis();
   deferSetting(11, cfg.carouselPaused);
 }
-static void changeCounty(lv_event_t *event) {
-  const uint8_t slot = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
-  if (slot >= cfg.weatherCount) return;
-  cfg.counties[slot] = lv_dropdown_get_selected((lv_obj_t *)lv_event_get_target(event));
+static void setWeatherCounty(uint8_t slot, int county) {
+  if (slot >= cfg.weatherCount || county < 0 || county >= kCountyCount ||
+      cfg.counties[slot] == county) return;
+  cfg.counties[slot] = county;
+  lv_label_set_text(lv_obj_get_child(weatherRegionButtons[slot],0),kCounties[county]);
   weatherData[slot] = WeatherData();
   weatherData[slot].summary = "更新中...";
   weatherSlot = slot;
@@ -1918,6 +1922,46 @@ static void changeCounty(lv_event_t *event) {
   lastWeatherAttempt = millis();
   if (networkTaskHandle) xTaskNotify(networkTaskHandle, kFetchWeather, eSetBits);
   lastInputMs = millis();
+}
+static void closeWeatherCities(lv_event_t *) {
+  lv_screen_load(settingsScreen);
+  lastInputMs = millis();
+}
+static void chooseWeatherCity(lv_event_t *event) {
+  setWeatherCounty(weatherCitySlot,(int)(uintptr_t)lv_event_get_user_data(event));
+  closeWeatherCities(nullptr);
+}
+static void openWeatherCities(lv_event_t *event) {
+  const uint8_t slot=(uint8_t)(uintptr_t)lv_event_get_user_data(event);
+  if (slot>=cfg.weatherCount) return;
+  weatherCitySlot=slot;
+  lv_label_set_text_fmt(weatherCityTitle,"選擇第 %d 個地區",slot+1);
+  for (int county=0; county<kCountyCount; ++county) {
+    const bool selected=cfg.counties[slot]==county;
+    lv_obj_set_style_bg_color(weatherCityButtons[county],
+        lv_color_hex(selected?0x344C40:0x202824),0);
+    lv_obj_set_style_border_color(weatherCityButtons[county],
+        lv_color_hex(selected?0x83D7BB:0x34433B),0);
+  }
+  lv_screen_load(weatherCityScreen);
+  lastInputMs=millis();
+}
+static void buildWeatherCityPicker() {
+  weatherCityScreen=lv_obj_create(nullptr);
+  lv_obj_set_style_bg_color(weatherCityScreen,lv_color_hex(0x080B0B),0);
+  lv_obj_set_style_pad_all(weatherCityScreen,0,0);
+  lv_obj_set_style_border_width(weatherCityScreen,0,0);
+  lv_obj_set_style_text_font(weatherCityScreen,&desk_font_16,0);
+  lv_obj_remove_flag(weatherCityScreen,LV_OBJ_FLAG_SCROLLABLE);
+  weatherCityTitle=label(weatherCityScreen,"選擇城市",12,5,460);
+  button(weatherCityScreen,"返回",544,2,84,30,closeWeatherCities);
+  for (int county=0; county<kCountyCount; ++county) {
+    lv_obj_t *control=button(weatherCityScreen,kCounties[county],
+        12+(county%6)*104,39+(county/6)*32,96,29,noAction);
+    weatherCityButtons[county]=control;
+    lv_obj_set_style_pad_all(control,0,0);
+    lv_obj_add_event_cb(control,chooseWeatherCity,LV_EVENT_PRESSED,(void *)(uintptr_t)county);
+  }
 }
 static void refreshWeatherRegionControls() {
   if (weatherCountLabel) lv_label_set_text_fmt(weatherCountLabel,"%d 個",cfg.weatherCount);
@@ -2338,11 +2382,6 @@ static void buildSettings() {
   button(network, LV_SYMBOL_DOWN, 574, 106, 48, 60, wifiPageDown);
   rebuildWifiList();
 
-  String options;
-  for (int i = 0; i < kCountyCount; ++i) {
-    if (i) options += '\n';
-    options += kCounties[i];
-  }
   label(weather,"地區數量",20,9,90);
   adjustButton(weather,"-",116,2,changeWeatherCount,-1,36,32);
   weatherCountLabel=label(weather,"",162,9,50);
@@ -2360,19 +2399,12 @@ static void buildSettings() {
     lv_obj_remove_flag(row,LV_OBJ_FLAG_SCROLLABLE);
     char number[4];snprintf(number,sizeof(number),"%d",slot+1);
     label(row,number,0,7,20);
-    lv_obj_t *county=lv_dropdown_create(row);
-    lv_obj_set_pos(county,24,0);lv_obj_set_size(county,162,34);
-    // Fit the 23px font inside the 34px control; a scrolled dropdown ignores release.
-    lv_obj_set_style_pad_ver(county,4,0);
-    lv_obj_set_style_pad_hor(county,8,0);
-    lv_obj_remove_flag(county,LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(county,lv_color_hex(0x202824),0);
-    lv_obj_set_style_text_color(county,lv_color_hex(0xF3F5F2),0);
-    lv_obj_set_style_border_color(county,lv_color_hex(0x34433B),0);
-    lv_dropdown_set_options(county,options.c_str());
-    lv_dropdown_set_selected(county,cfg.counties[slot]);
-    lv_obj_add_event_cb(county,changeCounty,LV_EVENT_VALUE_CHANGED,(void *)(uintptr_t)slot);
+    lv_obj_t *county=button(row,kCounties[cfg.counties[slot]],24,0,162,34,noAction);
+    weatherRegionButtons[slot]=county;
+    lv_obj_set_style_pad_all(county,0,0);
+    lv_obj_add_event_cb(county,openWeatherCities,LV_EVENT_PRESSED,(void *)(uintptr_t)slot);
   }
+  buildWeatherCityPicker();
   refreshWeatherRegionControls();
 
   label(stocks, "已選代號", 20, 9, 95);
