@@ -28,6 +28,7 @@ jobs:
         run: |
           ARDUINO_USER_DIR="$(arduino-cli config get directories.user)"
           python3 DeskDock_3p49/tools/patch_audio_library.py --library-dir "$ARDUINO_USER_DIR/libraries/ESP8266Audio"
+          python3 DeskDock_3p49/tools/patch_audio_stability.py --library-dir "$ARDUINO_USER_DIR/libraries/ESP8266Audio"
       - name: Apply pinned DNS core-lock fix
         run: |
           ARDUINO_DATA_DIR="$(arduino-cli config get directories.data)"
@@ -37,6 +38,11 @@ jobs:
           python3 -m unittest discover -s DeskDock_3p49/tools -p 'test_firmware_identity.py'
           python3 -m unittest discover -s DeskDock_3p49/tools -p 'test_audio_patch.py'
           python3 -m unittest discover -s DeskDock_3p49/tools -p 'test_dns_patch.py'
+          python3 -m unittest discover -s DeskDock_3p49/tools -p 'test_audio_stability_patch.py'
+          g++ -std=c++17 DeskDock_3p49/tools/test_touch_input.cpp -o /tmp/deskdock-touch-tests
+          /tmp/deskdock-touch-tests
+          g++ -std=c++17 -IDeskDock_3p49/tools/test_stubs DeskDock_3p49/tools/test_aac_memory.cpp -o /tmp/deskdock-aac-tests
+          /tmp/deskdock-aac-tests
           g++ -std=c++17 DeskDock_3p49/tools/test_settings_policy.cpp -o /tmp/deskdock-settings-tests
           /tmp/deskdock-settings-tests
           g++ -std=c++17 -fsyntax-only DeskDock_3p49/tools/test_rollback_policy.cpp

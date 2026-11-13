@@ -13,6 +13,7 @@
 #include "esp_lcd_panel_io.h"
 #include "src/axs15231b/esp_lcd_axs15231b.h"
 #include "i2c_bsp.h"
+#include "touch_input.h"
 #include "display_rotate.h"
 
 extern void desk_touch_activity(void);
@@ -181,98 +182,75 @@ static void example_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uin
   // Keep the panel's existing RAMWR/RAMWRC full-frame protocol.
   if (xQueueSend(flush_queue, &job, 0) != pdTRUE) abort();
 }
-typedef struct {
-  bool pressed;
-  uint8_t release_samples;
-  uint32_t release_started_ms;
-  uint32_t last_contact_ms;
-} touch_filter_t;
+static portMUX_TYPE touch_mux=portMUX_INITIALIZER_UNLOCKED;
+static desk_touch_queue_t touch_queue;
+static uint32_t touch_reads,touch_errors,touch_recoveries;
 
-static bool touch_filter_update(touch_filter_t *filter, uint32_t now,
-                                bool contact, bool released)
-{
-  if (contact) {
-    filter->release_samples = 0;
-    filter->pressed = true;
-    filter->last_contact_ms = now;
-  } else {
-    if (released) {
-      if (!filter->release_samples) filter->release_started_ms = now;
-      if (filter->release_samples < 2) ++filter->release_samples;
-      if (filter->release_samples >= 2 &&
-          (uint32_t)(now - filter->release_started_ms) >= 10) {
-        filter->pressed = false;
+void lvgl_port_cancel_pending_touch(void) {
+  portENTER_CRITICAL(&touch_mux);
+  desk_touch_cancel_queue(&touch_queue);
+  portEXIT_CRITICAL(&touch_mux);
+}
+void lvgl_port_touch_stats(uint32_t *reads,uint32_t *errors,uint32_t *recoveries,uint32_t *overflows) {
+  portENTER_CRITICAL(&touch_mux);
+  *reads=touch_reads;*errors=touch_errors;*recoveries=touch_recoveries;*overflows=touch_queue.overflows;
+  portEXIT_CRITICAL(&touch_mux);
+}
+static void touch_sample_task(void *arg) {
+  (void)arg;
+  desk_touch_filter_t filter={0};
+  uint8_t consecutive_timeouts=0;
+  uint32_t last_recovery=0;
+  TickType_t wake=xTaskGetTickCount();
+  for (;;) {
+    uint8_t command[11]={0xb5,0xab,0xa5,0x5a,0,0,0,0x0e,0,0,0};
+    uint8_t bytes[32]={0};
+    const esp_err_t error=i2c_master_touch_write_read(disp_touch_dev_handle,command,11,bytes,32);
+    const uint32_t now=(uint32_t)(esp_timer_get_time()/1000);
+    const uint16_t raw_x=((uint16_t)(bytes[2]&15)<<8)|bytes[3];
+    const uint16_t raw_y=((uint16_t)(bytes[4]&15)<<8)|bytes[5];
+    const bool contact=error==ESP_OK && bytes[1]==1 && raw_x<EXAMPLE_LCD_V_RES && raw_y<EXAMPLE_LCD_H_RES;
+    const desk_touch_sample_t sample=desk_touch_update(&filter,now,contact,
+        error==ESP_OK && bytes[1]==0,raw_y,EXAMPLE_LCD_V_RES-1-raw_x);
+    portENTER_CRITICAL(&touch_mux);
+    ++touch_reads;if(error!=ESP_OK)++touch_errors;
+    desk_touch_push(&touch_queue,sample);
+    portEXIT_CRITICAL(&touch_mux);
+    if (error==ESP_ERR_TIMEOUT) {
+      if (consecutive_timeouts<3)++consecutive_timeouts;
+    } else consecutive_timeouts=0;
+    if (consecutive_timeouts>=3 && (uint32_t)(now-last_recovery)>=1000) {
+      if(i2c_touch_recover_bus()==ESP_OK) {
+        portENTER_CRITICAL(&touch_mux);++touch_recoveries;portEXIT_CRITICAL(&touch_mux);
       }
-    } else {
-      // A failed transaction or malformed point is not evidence of release.
-      filter->release_samples = 0;
+      last_recovery=now;consecutive_timeouts=0;
     }
-    if (filter->pressed && (uint32_t)(now - filter->last_contact_ms) >= 150) {
-      // Bound a stale point without latching input off. Some idle reads fail;
-      // the next valid contact must still be accepted immediately.
-      filter->pressed = false;
-    }
+    // Do not burst overdue I2C polls after a timeout or bus recovery.
+    if ((TickType_t)(xTaskGetTickCount()-wake)>pdMS_TO_TICKS(20)) wake=xTaskGetTickCount();
+    vTaskDelayUntil(&wake,pdMS_TO_TICKS(10));
   }
-  return filter->pressed;
 }
-
-static void touch_filter_self_test(void)
-{
-  touch_filter_t filter = {};
-  if (!touch_filter_update(&filter, 0, true, false) ||
-      !touch_filter_update(&filter, 40, false, false) ||
-      !touch_filter_update(&filter, 80, false, true) ||
-      !touch_filter_update(&filter, 90, true, false) ||
-      !touch_filter_update(&filter, 100, false, true) ||
-       touch_filter_update(&filter, 110, false, true) ||
-       touch_filter_update(&filter, 120, false, true) ||
-      !touch_filter_update(&filter, 130, true, false) ||
-       touch_filter_update(&filter, 300, false, false) ||
-      !touch_filter_update(&filter, 310, true, false) ||
-      !touch_filter_update(&filter, 320, false, true) ||
-       touch_filter_update(&filter, 330, false, true) ||
-       touch_filter_update(&filter, 340, false, true) ||
-      !touch_filter_update(&filter, 350, true, false)) abort();
-  filter = (touch_filter_t){};
-  if (!touch_filter_update(&filter, UINT32_MAX - 10, true, false) ||
-      !touch_filter_update(&filter, 5, false, false) ||
-      !touch_filter_update(&filter, 15, false, true) ||
-       touch_filter_update(&filter, 25, false, true) ||
-       touch_filter_update(&filter, 35, false, true)) abort();
-  filter = (touch_filter_t){};
-  if (!touch_filter_update(&filter, 0, true, false) ||
-      !touch_filter_update(&filter, 10, false, true) ||
-       touch_filter_update(&filter, 20, false, true) ||
-      !touch_filter_update(&filter, 30, true, false) ||
-      !touch_filter_update(&filter, 40, false, true) ||
-       touch_filter_update(&filter, 50, false, true) ||
-      !touch_filter_update(&filter, 60, true, false)) abort();
-  printf("[TOUCH] filter self-test passed (dropout/2-sample release/rapid tap/recovery/tick wrap)\n");
-}
-
-static void TouchInputReadCallback(lv_indev_t * indev, lv_indev_data_t *indevData)
-{
-  static touch_filter_t filter;
-  static lv_point_t last_point;
-  uint8_t read_touchpad_cmd[11] = {0xb5, 0xab, 0xa5, 0x5a, 0x0, 0x0, 0x0, 0x0e,0x0, 0x0, 0x0};
-  uint8_t buff[32] = {0};
-  const bool read_ok = i2c_master_touch_write_read(
-      disp_touch_dev_handle,read_touchpad_cmd,11,buff,32) == ESP_OK;
-  const uint16_t pointX = (((uint16_t)buff[2] & 0x0f) << 8) | (uint16_t)buff[3];
-  const uint16_t pointY = (((uint16_t)buff[4] & 0x0f) << 8) | (uint16_t)buff[5];
-  const bool contact = read_ok && buff[1] > 0 && buff[1] < 5 &&
-                       pointX < EXAMPLE_LCD_V_RES && pointY < EXAMPLE_LCD_H_RES;
-  const bool was_pressed = filter.pressed;
-  const bool pressed = touch_filter_update(&filter, lv_tick_get(), contact,
-                                           read_ok && buff[1] == 0);
-  if (contact && pressed) {
-    if (!was_pressed) desk_touch_report(pointX, pointY);
-    last_point.x = pointY;
-    last_point.y = EXAMPLE_LCD_V_RES - 1 - pointX;
+static void TouchInputReadCallback(lv_indev_t *indev,lv_indev_data_t *data) {
+  static lv_obj_t *previous_screen;
+  static bool previous_pressed;
+  if (previous_screen!=lv_screen_active()) {
+    previous_screen=lv_screen_active();
+    lvgl_port_cancel_pending_touch();
+  }
+  const uint32_t now=(uint32_t)(esp_timer_get_time()/1000);
+  portENTER_CRITICAL(&touch_mux);
+  const desk_touch_sample_t sample=desk_touch_pop(&touch_queue,now);
+  const bool more=touch_queue.count>0;
+  portEXIT_CRITICAL(&touch_mux);
+  if (sample.cancel) lv_indev_reset(indev,NULL);
+  data->state=sample.pressed?LV_INDEV_STATE_PRESSED:LV_INDEV_STATE_RELEASED;
+  data->point.x=sample.x;data->point.y=sample.y;
+  data->continue_reading=more;
+  if (sample.pressed) {
+    if(!previous_pressed)desk_touch_report(EXAMPLE_LCD_V_RES-1-sample.y,sample.x);
     desk_touch_activity();
   }
-  indevData->state = pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-  if (pressed) indevData->point = last_point;
+  previous_pressed=sample.pressed;
 }
 
 bool lvgl_port_lock(int timeout_ms)
@@ -313,7 +291,6 @@ void example_lvgl_port_task(void *arg)
 
 void lvgl_port_init(void)
 {
-  touch_filter_self_test();
   display_rotation_self_test();
   flush_done_semaphore = xSemaphoreCreateBinary();
   assert(flush_done_semaphore);
@@ -462,6 +439,7 @@ void lvgl_port_init(void)
 bool lvgl_port_start(int first_frame_timeout_ms)
 {
   if (lvgl_task_handle) return false;
+  if (xTaskCreatePinnedToCore(touch_sample_task,"touch sample",3072,NULL,3,NULL,0)!=pdPASS) abort();
   if (xTaskCreatePinnedToCore(example_lvgl_port_task, "LVGL", LVGL_TASK_STACK_SIZE,
                              NULL, LVGL_TASK_PRIORITY, &lvgl_task_handle, 0) != pdPASS) abort();
   return xSemaphoreTake(first_frame_semaphore, pdMS_TO_TICKS(first_frame_timeout_ms)) == pdTRUE;

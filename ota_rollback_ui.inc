@@ -44,6 +44,7 @@ static void rollbackConfirmClicked(lv_event_t *) {
 static void rollbackAsk(lv_event_t *) {
   if (otaRollbackDialogOpen() || otaBusy.load() || rollbackStage.load() != RollbackStage::Ready) return;
   rollbackRequested = rollbackTarget;
+  lvgl_port_cancel_pending_touch();
   rollbackDialog = lv_obj_create(otaPanel);
   lv_obj_set_pos(rollbackDialog,0,0); lv_obj_set_size(rollbackDialog,640,172);
   lv_obj_set_style_pad_all(rollbackDialog,0,0);

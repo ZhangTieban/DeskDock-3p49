@@ -100,24 +100,36 @@ bool BestRadioHlsSource::push(const uint8_t *data, size_t len) {
 
 bool BestRadioHlsSource::fetchText(const String &url, size_t limit) {
   if (!text_ || limit > kTextBytes) return false;
-  xSemaphoreTake(httpMutex_, portMAX_DELAY);
-  if (stop_.load()) { xSemaphoreGive(httpMutex_); return false; }
-  text_[0] = 0;
-  TextSink sink{text_, 0, limit, false};
-  esp_http_client_config_t cfg = {};
-  cfg.url = url.c_str();
-  cfg.crt_bundle_attach = esp_crt_bundle_attach;
-  cfg.event_handler = receiveText;
-  cfg.user_data = &sink;
-  cfg.timeout_ms = 6000;
-  cfg.buffer_size = 2048;
-  esp_http_client_handle_t client = esp_http_client_init(&cfg);
-  if (!client) { xSemaphoreGive(httpMutex_); return false; }
-  const esp_err_t result = esp_http_client_perform(client);
-  lastHttpStatus_ = esp_http_client_get_status_code(client);
-  esp_http_client_cleanup(client);
-  xSemaphoreGive(httpMutex_);
-  return result == ESP_OK && lastHttpStatus_ == 200 && !sink.overflow && sink.size;
+  for (int attempt = 0; attempt < 2 && !stop_.load(); ++attempt) {
+    while (xSemaphoreTake(httpMutex_, pdMS_TO_TICKS(100)) != pdTRUE)
+      if (stop_.load()) return false;
+    if (stop_.load()) { xSemaphoreGive(httpMutex_); return false; }
+    lastHttpStatus_ = 0;
+    text_[0] = 0;
+    TextSink sink{text_, 0, limit, false};
+    esp_http_client_config_t cfg = {};
+    cfg.url = url.c_str();
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.event_handler = receiveText;
+    cfg.user_data = &sink;
+    cfg.timeout_ms = 6000;
+    cfg.buffer_size = 2048;
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) { xSemaphoreGive(httpMutex_); return false; }
+    const esp_err_t result = esp_http_client_perform(client);
+    lastHttpStatus_ = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    xSemaphoreGive(httpMutex_);
+    if (result == ESP_OK && lastHttpStatus_ == 200 && !sink.overflow && sink.size) return true;
+    Serial.printf("[HLS] playlist failed attempt=%d error=%s http=%d overflow=%d\n",
+                  attempt + 1, esp_err_to_name(result), lastHttpStatus_, sink.overflow);
+    // Do not retry permanent HTTP errors or oversized/unusable responses.
+    if (sink.overflow || (lastHttpStatus_ >= 400 && lastHttpStatus_ < 500 &&
+                         lastHttpStatus_ != 408 && lastHttpStatus_ != 429)) break;
+    if (attempt == 0)
+      for (int wait = 0; wait < 25 && !stop_.load(); ++wait) vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  return false;
 }
 
 String BestRadioHlsSource::resolveUrl(const String &base, const String &relative) {
@@ -236,8 +248,10 @@ bool BestRadioHlsSource::processPacket(const uint8_t *packet) {
 }
 
 bool BestRadioHlsSource::downloadSegment(const String &segment) {
-  xSemaphoreTake(httpMutex_, portMAX_DELAY);
+  while (xSemaphoreTake(httpMutex_, pdMS_TO_TICKS(100)) != pdTRUE)
+    if (stop_.load()) return false;
   if (stop_.load()) { xSemaphoreGive(httpMutex_); return false; }
+  lastHttpStatus_ = 0;
   esp_http_client_config_t cfg = {};
   cfg.url = segment.c_str();
   cfg.crt_bundle_attach = esp_crt_bundle_attach;
@@ -283,6 +297,10 @@ void BestRadioHlsSource::run() {
   if (!resolveStation(master)) errors = 5;
   else { media = master; if (!loadMediaPlaylist(media)) errors = 5; }
   while (!stop_.load() && errors < 5) {
+    // Wait without owning a TLS client or the shared HTTP gate. Leave room for
+    // the next segment so a full audio ring does not pin scarce internal RAM.
+    while (buffered() > 65536 && !stop_.load()) vTaskDelay(pdMS_TO_TICKS(10));
+    if (stop_.load()) break;
     const time_t now = time(nullptr);
     if (expires_ && now > 1700000000 && static_cast<uint32_t>(now + 120) >= expires_) {
       if (!resolveStation(master)) { ++errors; vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
@@ -293,7 +311,10 @@ void BestRadioHlsSource::run() {
     uint32_t sequence = 0;
     if (!nextSegment(media, segment, sequence)) {
       if (lastHttpStatus_ != 200 && ++errors >= 2) {
-        if (resolveStation(master)) { media = master; loadMediaPlaylist(media); errors = 0; }
+        if (resolveStation(master)) {
+          media = master;
+          if (loadMediaPlaylist(media)) errors = 0;
+        }
       }
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;

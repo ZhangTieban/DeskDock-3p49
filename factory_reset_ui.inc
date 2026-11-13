@@ -51,6 +51,7 @@ static void factoryConfirm(lv_event_t *) {
 static void factoryAsk(lv_event_t *) {
   if (otaRollbackDialogOpen() || otaBusy.load() || otaPendingVerify.load() ||
       rollbackBoot.load()==RollbackBoot::Waiting) return;
+  lvgl_port_cancel_pending_touch();
   factoryDialog=lv_obj_create(otaPanel);
   lv_obj_set_pos(factoryDialog,0,0);lv_obj_set_size(factoryDialog,640,172);
   lv_obj_set_style_pad_all(factoryDialog,0,0);

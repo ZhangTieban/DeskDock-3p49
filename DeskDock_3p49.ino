@@ -888,17 +888,18 @@ class RadioI2SOutput : public AudioOutputI2S {
     return true;
   }
   bool SetRate(int hz) override {
-    if (!AudioOutputI2S::SetRate(hz)) return false;
+    if (!healthy || !AudioOutputI2S::SetRate(hz)) { healthy = false; return false; }
     if (hz == codecRate) return true;
     if (!setCodecRate(hz)) {
       Serial.printf("[RADIO] codec rate failed: %d Hz\n", hz);
+      healthy = false;
       return false;
     }
     codecRate = hz;
     Serial.printf("[RADIO] sample rate: %d Hz\n", hz);
     return true;
   }
-  bool codecConfigured() const { return codecRate > 0; }
+  bool codecConfigured() const { return healthy && codecRate > 0; }
 
   void drainEndOfTrack() {
     if (!i2sOn || txPaused) return;
@@ -938,6 +939,7 @@ class RadioI2SOutput : public AudioOutputI2S {
  private:
   AudioLeveler leveler;
   bool txPaused = false;
+  bool healthy = true;
   int codecRate = 0;
 };
 
@@ -1194,23 +1196,25 @@ static void radioAudioTask(void *) {
             } else if (hls) {
               const uint32_t start = millis();
               while (hls->buffered() < 32768 && !hls->failed() &&
-                     (uint32_t)(millis() - start) < 20000 &&
+                     (uint32_t)(millis() - start) < 45000 &&
                      WiFi.status() == WL_CONNECTED && radioCommand.load() == -1)
                 vTaskDelay(pdMS_TO_TICKS(10));
               Serial.printf("[HLS] prebuffer=%u bytes\n", (unsigned)hls->buffered());
             }
-            output = new RadioI2SOutput();
-            if (command >= 4) {
-              RadioAACDecoder *aac = new RadioAACDecoder();
-              if (aac && aac->ready()) decoder = aac;
-              else {
-                delete aac;
-                Serial.println("[RADIO] AAC decoder memory unavailable");
-              }
-            } else decoder = new AudioGeneratorMP3();
             AudioFileSource *audioSource = hls ? source : static_cast<AudioFileSource *>(buffer);
             const bool prebuffered = hls ? hls->buffered() >= 32768 :
                                       buffer && buffer->getFillLevel() >= 65536;
+            if (prebuffered && !radioLinkLost.load() && radioCommand.load() == -1) {
+              output = new RadioI2SOutput();
+              if (command >= 4) {
+                RadioAACDecoder *aac = new RadioAACDecoder();
+                if (aac && aac->ready()) decoder = aac;
+                else {
+                  delete aac;
+                  Serial.println("[RADIO] AAC decoder memory unavailable");
+                }
+              } else decoder = new AudioGeneratorMP3();
+            }
             if (audioSource && prebuffered && !radioLinkLost.load() &&
                 WiFi.status() == WL_CONNECTED &&
                 radioCommand.load() == -1 && output && decoder &&
@@ -1246,7 +1250,8 @@ static void radioAudioTask(void *) {
       }
       if (appliedVolume.load() != desiredAudioVolume.load()) (void)applyDesiredAudioVolume();
       if (radioLinkLost.load() || WiFi.status() != WL_CONNECTED ||
-          !decoder->isRunning() || !decoder->loop() || radioLinkLost.load()) {
+          !output || !output->codecConfigured() || !decoder->isRunning() ||
+          !decoder->loop() || !output->codecConfigured() || radioLinkLost.load()) {
         Serial.println("[RADIO] stream ended");
         if ((uint32_t)(millis() - playingSinceMs) >= 60000) retryCount = 0;
         int expected = -1;
@@ -1263,9 +1268,11 @@ static void radioAudioTask(void *) {
                                                 (uint64_t)source->getPos() * 1000 / size));
       }
       if (appliedVolume.load() != desiredAudioVolume.load()) (void)applyDesiredAudioVolume();
-      if (!decoder->isRunning() || !decoder->loop()) {
+      if (!output || !output->codecConfigured() || !decoder->isRunning() ||
+          !decoder->loop() || !output->codecConfigured()) {
         const uint32_t size = source->getSize();
-        const bool reachedEnd = size && source->getPos() >= size && decoder->isRunning();
+        const bool reachedEnd = output && output->codecConfigured() && size &&
+                                source->getPos() >= size && decoder->isRunning();
         Serial.println(reachedEnd ? "[MP3] playback ended" : "[MP3] playback interrupted");
         if (reachedEnd && output) output->drainEndOfTrack();
         closeStream();
@@ -2084,6 +2091,7 @@ static void scanMp3InBackground() {
 
 static void settingsIoTask(void *) {
   uint32_t lastDisplayReport = 0;
+  uint32_t lastTouchReport = 0;
   for (;;) {
     if (mp3ScanRequested.exchange(false)) scanMp3InBackground();
     flushPendingSettings();
@@ -2095,6 +2103,13 @@ static void settingsIoTask(void *) {
     }
     const int page = pendingSettingsPageReport.exchange(-1);
     if (page >= 0) Serial.printf("[UI] settings page=%d\n", page);
+    if ((uint32_t)(millis() - lastTouchReport) >= 5000) {
+      lastTouchReport = millis();
+      uint32_t reads, errors, recoveries, overflows;
+      lvgl_port_touch_stats(&reads, &errors, &recoveries, &overflows);
+      Serial.printf("[TOUCH] reads=%u errors=%u recoveries=%u overflows=%u\n",
+                    (unsigned)reads, (unsigned)errors, (unsigned)recoveries, (unsigned)overflows);
+    }
     if ((uint32_t)(millis() - lastDisplayReport) >= 1000) {
       lastDisplayReport = millis();
       portENTER_CRITICAL(&lcdStatsMux);

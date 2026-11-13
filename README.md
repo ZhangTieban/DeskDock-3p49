@@ -18,6 +18,7 @@ git clone https://github.com/ZhangTieban/DeskDock-3p49.git DeskDock_3p49
 cd DeskDock_3p49
 # 安裝上述固定版本的 ESP8266Audio 後，先套用與 CI 相同的邊界修正：
 python3 tools/patch_audio_library.py --library-dir "$(arduino-cli config get directories.user)/libraries/ESP8266Audio"
+python3 tools/patch_audio_stability.py --library-dir "$(arduino-cli config get directories.user)/libraries/ESP8266Audio"
 python3 tools/patch_esp32_core.py --core-dir "$(arduino-cli config get directories.data)/packages/esp32/hardware/esp32/3.3.7"
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=huge_app' \
@@ -66,3 +67,11 @@ Wi-Fi 密碼與設定存在裝置 NVS，原始碼與 Release 不包含使用者�
 「一般 → 更新/退版 → 系統設定」新增「回到初始設定」。確認後停止音訊，清除 Wi-Fi、天氣、股票、亮度、音量、時間格式與輪播設定，再重新啟動。保留目前 app、前版分區、SD 字庫、MP3 與硬體 RTC；不格式化 SD、不抹除整片 Flash。OTA 或退版忙碌、首次啟動驗證中不允許重設。
 
 Arduino ESP32 3.3.7 的 DNS 快取清除會同步呼叫待完成的 DNS/SNTP 回呼；電台首次解析網址可能在錯誤執行緒觸發 TCP/IP 核心鎖斷言。`tools/patch_esp32_core.py` 只為快取清除加上核心鎖，保留原有鎖所有權，阻塞式連線仍在鎖外。本機與發布 CI 使用相同固定版本修補；不關閉 SDK 執行緒檢查。
+
+## 觸控與音訊穩定性（0.2.07）
+
+觸控改由獨立工作每 10 ms 取樣，畫面工作只讀取已過濾的事件。按下與放開皆須連續有效樣本；短暫讀取失敗保留拖曳，逾時、過舊或佇列溢位則取消操作。換頁及重設／退版確認視窗會清除待處理觸控，避免舊點擊落到新控制項。觸控 I2C 逾時有界限，連續逾時會嘗試復原專用匯流排；序列埠每五秒回報讀取、錯誤、復原及溢位累計。
+
+AAC 解碼器大型狀態移至 PSRAM；外部記憶體配置失敗時停止啟動，不回退擠占內部 RAM。I2S 配置與取樣率切換失敗改為正常回報及清理，避免配置失敗直接斷言重啟。好事電台的播放清單暫時性失敗最多重試一次，初始預載等待延長至 45 秒；音訊緩衝足夠時，在下一次下載前釋放 HTTP 閘門與 TLS 記憶體。既有 Wi-Fi 斷線停止及 DNS 修正保留。
+
+固定版本修補、觸控過濾與 AAC 配置失敗路徑均有測試；操作手感、長時間串流與弱訊號復原仍需實機驗收。介面位置、音量規則及 SD 字庫包不變。

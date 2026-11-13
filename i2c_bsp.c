@@ -113,9 +113,12 @@ uint8_t i2c_read_buff(i2c_master_dev_handle_t dev_handle,int reg,uint8_t *buf,ui
 }
 
 
-uint8_t i2c_master_touch_write_read(i2c_master_dev_handle_t dev_handle,uint8_t *writeBuf,uint8_t writeLen,uint8_t *readBuf,uint8_t readLen)
+esp_err_t i2c_master_touch_write_read(i2c_master_dev_handle_t dev_handle,uint8_t *writeBuf,uint8_t writeLen,uint8_t *readBuf,uint8_t readLen)
 {
-  // This touch bus has no asynchronous transactions. Keep a failed read from
-  // blocking LVGL input processing for the generic five-second I2C timeout.
-  return i2c_master_transmit_receive(dev_handle,writeBuf,writeLen,readBuf,readLen,30);
+  // Dedicated synchronous touch bus; bound sampler latency on a failed read.
+  return i2c_master_transmit_receive(dev_handle,writeBuf,writeLen,readBuf,readLen,12);
+}
+
+esp_err_t i2c_touch_recover_bus(void) {
+  return i2c_master_bus_reset(user_i2c_port1_handle);
 }
