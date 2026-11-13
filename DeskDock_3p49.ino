@@ -1756,11 +1756,6 @@ static void editStock(lv_event_t *) { openEditor(EditField::Stock, "股票代號
 static void editRadioUrl(lv_event_t *) {
   openEditor(EditField::RadioUrl, "自訂電台 HTTP MP3 網址", cfg.customRadioUrl);
 }
-static void editDateTime(lv_event_t *) {
-  tm value; char buf[24] = "2026-01-01 12:00";
-  if (getLocalTime(&value, 50)) strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &value);
-  openEditor(EditField::DateTime, "日期時間 YYYY-MM-DD HH:MM", buf);
-}
 
 static void connectWifi(lv_event_t *) {
   networkRefresh = true;
@@ -2298,10 +2293,9 @@ static void buildSettings() {
   adjustButton(generalCards[2], "-", 9, 26, changeVolume, -5, 86, 27);
   adjustButton(generalCards[2], "+", 105, 26, changeVolume, 5, 86, 27);
 
-  generalLabel(generalCards[3], "日期與時間", 10, 2, 180);
-  generalButton(generalCards[3], "設定時間", 9, 26, 86, 27, editDateTime);
+  generalLabel(generalCards[3], "時間格式", 10, 2, 180);
   hourModeButton = generalButton(generalCards[3], cfg.hour12 ? "12 小時" : "24 小時",
-                                 105, 26, 86, 27, changeHourMode);
+                                 9, 26, 182, 27, changeHourMode);
 
   generalLabel(generalCards[4], "內容輪播", 10, 2, 90);
   carouselValueLabel = generalLabel(generalCards[4], "", 100, 5, 90);

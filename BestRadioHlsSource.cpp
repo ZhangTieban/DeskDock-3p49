@@ -156,6 +156,10 @@ bool BestRadioHlsSource::resolveStation(String &master) {
   master = "";
   if (!master.reserve(end - begin + 1)) return false;
   for (const char *p = begin; p < end; ++p) master += *p;
+  // The official CDN also serves these signed public streams over HTTP.
+  // Keep its token/path intact while avoiding TLS allocations during playback.
+  // Relative media playlists and segments inherit the same transport.
+  master = String("http://") + master.substring(8);
   const int pos = master.indexOf("expires=");
   expires_ = pos >= 0 ? static_cast<uint32_t>(master.substring(pos + 8).toInt()) : 0;
   Serial.printf("[HLS] official channel=%u URL expires=%u\n", channel_, expires_);
