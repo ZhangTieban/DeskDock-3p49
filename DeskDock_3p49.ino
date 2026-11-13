@@ -2362,6 +2362,10 @@ static void buildSettings() {
     label(row,number,0,7,20);
     lv_obj_t *county=lv_dropdown_create(row);
     lv_obj_set_pos(county,24,0);lv_obj_set_size(county,162,34);
+    // Fit the 23px font inside the 34px control; a scrolled dropdown ignores release.
+    lv_obj_set_style_pad_ver(county,4,0);
+    lv_obj_set_style_pad_hor(county,8,0);
+    lv_obj_remove_flag(county,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(county,lv_color_hex(0x202824),0);
     lv_obj_set_style_text_color(county,lv_color_hex(0xF3F5F2),0);
     lv_obj_set_style_border_color(county,lv_color_hex(0x34433B),0);
