@@ -332,6 +332,8 @@ static bool otaInstallFromSd() {
 }
 
 static void otaWorker(void *parameter) {
+  otaTlsPsramAllocations.store(0);
+  otaTlsOwner.store(xTaskGetCurrentTaskHandle());
   const bool install = parameter != nullptr;
   const int resumeStation = radioNeedsNetwork() ? radioStation.load() : 0;
   bool successful = false;
@@ -360,6 +362,8 @@ static void otaWorker(void *parameter) {
   if (resumeStation && radioTaskHandle &&
       (!install || !successful) && WiFi.status() == WL_CONNECTED)
     radioCommand.store(resumeStation);
+  Serial.printf("[OTA] TLS PSRAM allocations=%u\n", (unsigned)otaTlsPsramAllocations.load());
+  otaTlsOwner.store(nullptr);
   otaBusy.store(false);
   vTaskDelete(nullptr);
 }

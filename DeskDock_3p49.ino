@@ -36,6 +36,7 @@
 #include "desk_font.h"
 #include "ota_config.h"
 #include "settings_policy.h"
+#include "ota_tls_memory.h"
 
 // The panel and touch driver come from the supplied Waveshare 3.49 example.
 static constexpr int kWidth = 640;
@@ -3193,6 +3194,7 @@ void setup() {
   if (!codecControlMutex) abort();
   mp3RequestMutex = xSemaphoreCreateMutex();
   networkHttpMutex = xSemaphoreCreateMutex();
+  otaInitTlsMemory();
   i2c_master_Init();
   Serial.printf("[POWER] latch initialization %s\n", initPowerLatch() ? "ok" : "failed");
   Serial.printf("[TOUCH] I2C %s\n", i2c_touch_probe() ? "ready" : "not found");

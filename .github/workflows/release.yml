@@ -43,6 +43,8 @@ jobs:
           /tmp/deskdock-touch-tests
           g++ -std=c++17 -IDeskDock_3p49/tools/test_stubs DeskDock_3p49/tools/test_aac_memory.cpp -o /tmp/deskdock-aac-tests
           /tmp/deskdock-aac-tests
+          g++ -std=c++17 -IDeskDock_3p49/tools/test_stubs DeskDock_3p49/tools/test_ota_tls_memory.cpp -o /tmp/deskdock-ota-tls-tests
+          /tmp/deskdock-ota-tls-tests
           g++ -std=c++17 DeskDock_3p49/tools/test_settings_policy.cpp -o /tmp/deskdock-settings-tests
           /tmp/deskdock-settings-tests
           g++ -std=c++17 -fsyntax-only DeskDock_3p49/tools/test_rollback_policy.cpp
