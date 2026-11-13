@@ -1,3 +1,7 @@
+// The SDK's esp_mem.h needs C linkage before mbedTLS configuration includes it.
+extern "C" {
+#include <esp_mem.h>
+}
 #include <Arduino.h>
 #include <WiFi.h>
 #include <Preferences.h>

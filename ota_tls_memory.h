@@ -3,7 +3,9 @@
 #include <atomic>
 #include <cstdint>
 #include <esp_heap_caps.h>
+extern "C" {
 #include <esp_mem.h>
+}
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <mbedtls/platform.h>
