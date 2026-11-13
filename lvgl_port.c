@@ -185,12 +185,17 @@ static void example_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uin
 static portMUX_TYPE touch_mux=portMUX_INITIALIZER_UNLOCKED;
 static desk_touch_queue_t touch_queue;
 static uint32_t touch_reads,touch_errors,touch_recoveries;
-static desk_touch_trace_t touch_raw_trace,touch_pending_trace;
-static bool touch_trace_pending;
+static desk_touch_trace_t touch_raw_trace,touch_traces[32];
+static uint8_t touch_trace_head,touch_trace_count;
+static void push_touch_trace(desk_touch_trace_t trace) {
+  if(touch_trace_count==32)return;
+  touch_traces[(touch_trace_head+touch_trace_count)%32]=trace;
+  ++touch_trace_count;
+}
 bool lvgl_port_take_touch_trace(desk_touch_trace_t *trace) {
   portENTER_CRITICAL(&touch_mux);
-  const bool ready=touch_trace_pending;
-  if(ready){*trace=touch_pending_trace;touch_trace_pending=false;}
+  const bool ready=touch_trace_count>0;
+  if(ready){*trace=touch_traces[touch_trace_head];touch_trace_head=(touch_trace_head+1)%32;--touch_trace_count;}
   portEXIT_CRITICAL(&touch_mux);
   return ready;
 }
@@ -225,7 +230,8 @@ static void touch_sample_task(void *arg) {
     portENTER_CRITICAL(&touch_mux);
     touch_raw_trace=(desk_touch_trace_t){.time_ms=now,.error=error,.x=raw_x,.y=raw_y,
       .count=bytes[1],.event=bytes[2]>>6,.pressed=sample.pressed,.cancel=sample.cancel,.kind=1};
-    if(was_pressed!=sample.pressed || sample.cancel){touch_pending_trace=touch_raw_trace;touch_trace_pending=true;}
+    if(was_pressed!=sample.pressed || sample.cancel ||
+       (was_pressed && (!contact || (bytes[2]>>6)==1)))push_touch_trace(touch_raw_trace);
     ++touch_reads;if(error!=ESP_OK)++touch_errors;
     desk_touch_push(&touch_queue,sample);
     portEXIT_CRITICAL(&touch_mux);
@@ -258,9 +264,9 @@ static void TouchInputReadCallback(lv_indev_t *indev,lv_indev_data_t *data) {
   const int32_t latest_age=(int32_t)(now-touch_queue.latest.time_ms);
   const desk_touch_sample_t sample=desk_touch_pop(&touch_queue,now);
   if(sample.cancel && !queued_cancel){
-    touch_pending_trace=touch_raw_trace;touch_pending_trace.kind=2;
-    touch_pending_trace.head_age=head_age;touch_pending_trace.latest_age=latest_age;
-    touch_trace_pending=true;
+    desk_touch_trace_t trace=touch_raw_trace;trace.kind=2;
+    trace.head_age=head_age;trace.latest_age=latest_age;
+    push_touch_trace(trace);
   }
   const bool more=touch_queue.count>0;
   portEXIT_CRITICAL(&touch_mux);
