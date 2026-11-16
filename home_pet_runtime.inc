@@ -110,7 +110,7 @@ static void animateHomeDog(lv_timer_t *timer) {
   const unsigned index = static_cast<unsigned>(action);
   unsigned frameIndex=actionTick%kPetFrameCounts[index];
   if(!testing&&period&&(action==PetAction::Spin||action==PetAction::Stretch)){
-    const uint32_t withinSecond=std::min(999U,(uint32_t)(millis()-homePetClockAt));
+    const uint32_t withinSecond=std::min<uint32_t>(999,(uint32_t)(millis()-homePetClockAt));
     frameIndex=std::min((elapsed*1000+withinSecond)/kPetTickMs,(uint32_t)kPetFrameCounts[index]-1);
   }
   const PetFrame &frame = kPetActions[index][frameIndex];
