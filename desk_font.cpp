@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstring>
 #include "sd_access.h"
+#include "event_log.h"
 
 struct DeskGlyph {
   uint32_t codepoint, offset;
@@ -97,6 +98,11 @@ lv_font_t desk_font_86 = makeFont(&desk_blob_86, 98, 10, &lv_font_montserrat_14)
 lv_font_t desk_font_88 = makeFont(&desk_blob_88, 99, 9, &lv_font_montserrat_14);
 
 static std::atomic<bool> sdMounted{false};
+static std::atomic<uint32_t> sdGlyphReads{0};
+static bool builtinSymbolDsc(const lv_font_t *,lv_font_glyph_dsc_t *dsc,uint32_t letter,uint32_t next) {
+  if(letter<0xF000 || letter>0xF8FF)return false;
+  return lv_font_montserrat_14.get_glyph_dsc(&lv_font_montserrat_14,dsc,letter,next);
+}
 static lv_fs_drv_t sdFontFs;
 
 static bool sdFontReady(lv_fs_drv_t *) { return sdMounted; }
@@ -120,6 +126,7 @@ static lv_fs_res_t sdFontClose(lv_fs_drv_t *, void *handle) {
 
 static lv_fs_res_t sdFontRead(lv_fs_drv_t *, void *handle, void *buffer,
                               uint32_t count, uint32_t *readCount) {
+  sdGlyphReads.fetch_add(1);
   DeskSdLock lock;
   *readCount = static_cast<File *>(handle)->read(static_cast<uint8_t *>(buffer), count);
   return LV_FS_RES_OK;
@@ -187,9 +194,18 @@ void deskFontInitSd() {
     {&desk_font_20, "/fonts/NotoSansTC-Regular.ttf", 20},
   };
   unsigned loaded = 0;
+  static lv_font_t symbols[sizeof(files)/sizeof(files[0])];
+  unsigned symbolIndex=0;
   for (const FontFile &entry : files) {
     const lv_font_t *oldFallback = entry.font->fallback;
-    lv_font_t *tail = entry.font;
+    // Font Awesome icons already exist in the original Montserrat fallback.
+    // Resolve only that PUA range before the four SD fonts; CJK/Latin keep
+    // their original size, weight, and SD fallback order.
+    lv_font_t *tail=&symbols[symbolIndex++];
+    *tail=lv_font_montserrat_14;
+    tail->get_glyph_dsc=builtinSymbolDsc;
+    tail->fallback=nullptr;
+    entry.font->fallback=tail;
     const char *paths[] = {entry.path, "/fonts/Jigmo.ttf", "/fonts/Jigmo2.ttf", "/fonts/Jigmo3.ttf"};
     for (unsigned i = 0; i < 4; ++i) {
       bool exists;
@@ -205,6 +221,28 @@ void deskFontInitSd() {
     }
     tail->fallback = oldFallback;
   }
+  const uint32_t readsBefore=sdGlyphReads.load();bool symbolOkay=true;
+  for(const FontFile &entry : files){
+    for(uint32_t code : {0xF04BU,0xF04CU,0xF053U,0xF054U,0xF013U}){
+      lv_font_glyph_dsc_t found{},original{};
+      symbolOkay=lv_font_get_glyph_dsc(entry.font,&found,code,0) &&
+        lv_font_get_glyph_dsc(&lv_font_montserrat_14,&original,code,0) &&
+        found.resolved_font->dsc==lv_font_montserrat_14.dsc && found.adv_w==original.adv_w &&
+        found.box_w==original.box_w && found.box_h==original.box_h && symbolOkay;
+    }
+  }
+  symbolOkay=symbolOkay && sdGlyphReads.load()==readsBefore;
+  Serial.printf("[FONT] symbol fast path %s; SD reads=%u\n",symbolOkay ? "PASS" : "FAIL",
+                (unsigned)(sdGlyphReads.load()-readsBefore));
+  desk_log_event(symbolOkay ? DESK_LOG_INFO : DESK_LOG_ERROR,"FONT_SYMBOL_PATH",
+                 symbolOkay,sdGlyphReads.load()-readsBefore,"original icon metrics; no SD glyph lookup");
+  const uint32_t voltageReads=sdGlyphReads.load();lv_font_glyph_dsc_t voltage{};
+  const bool voltageOkay=lv_font_get_glyph_dsc(&desk_font_10_bold,&voltage,'V',0) &&
+    voltage.resolved_font==&desk_font_10_bold && sdGlyphReads.load()==voltageReads;
+  Serial.printf("[FONT] voltage fast path %s; SD reads=%u\n",voltageOkay ? "PASS" : "FAIL",
+                (unsigned)(sdGlyphReads.load()-voltageReads));
+  desk_log_event(voltageOkay ? DESK_LOG_INFO : DESK_LOG_ERROR,"FONT_VOLTAGE_PATH",
+                 voltageOkay,sdGlyphReads.load()-voltageReads,"built-in 10px V; no periodic SD lookup");
   Serial.printf("[FONT] SD mounted, %u/%u font fallbacks ready in %u ms\n", loaded,
                 (unsigned)(4 * sizeof(files) / sizeof(files[0])), (unsigned)(millis() - startedAt));
 }

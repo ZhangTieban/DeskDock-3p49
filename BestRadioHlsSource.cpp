@@ -1,4 +1,5 @@
 #include "BestRadioHlsSource.h"
+#include "event_log.h"
 
 #include <esp_crt_bundle.h>
 #include <esp_heap_caps.h>
@@ -28,9 +29,10 @@ esp_err_t receiveText(esp_http_client_event_t *event) {
 
 BestRadioHlsSource::~BestRadioHlsSource() { close(); }
 
-bool BestRadioHlsSource::begin(uint8_t channel, SemaphoreHandle_t httpMutex) {
+bool BestRadioHlsSource::begin(uint8_t channel, SemaphoreHandle_t httpMutex, const std::atomic<int> *command) {
   if (channel >= 4 || ring_ || !httpMutex) return false;
   channel_ = channel;
+  command_ = command;
   httpMutex_ = httpMutex;
   ring_ = static_cast<uint8_t *>(heap_caps_malloc(kRingBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   text_ = static_cast<char *>(heap_caps_malloc(kTextBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -45,6 +47,7 @@ bool BestRadioHlsSource::begin(uint8_t channel, SemaphoreHandle_t httpMutex) {
 }
 
 bool BestRadioHlsSource::close() {
+  const uint32_t started=millis();
   stop_.store(true);
   if (done_) {
     // All HTTP calls have finite timeouts; wait until the worker no longer owns the buffers.
@@ -55,6 +58,7 @@ bool BestRadioHlsSource::close() {
   }
   if (ring_) { heap_caps_free(ring_); ring_ = nullptr; }
   if (text_) { heap_caps_free(text_); text_ = nullptr; }
+  if(millis()-started>=300)desk_log_event(DESK_LOG_WARN,"HLS_CLOSE_SLOW",millis()-started,channel_,"waiting for HTTP producer teardown");
   return true;
 }
 
@@ -79,8 +83,11 @@ uint32_t BestRadioHlsSource::readNonBlock(void *data, uint32_t len) {
 uint32_t BestRadioHlsSource::read(void *data, uint32_t len) {
   const uint32_t start = millis();
   while (buffered() == 0 && !failed_.load() && !stop_.load() &&
+         (!command_ || command_->load()==-1) &&
          static_cast<uint32_t>(millis() - start) < 6000)
     vTaskDelay(pdMS_TO_TICKS(2));
+  if(command_ && command_->load()!=-1)return 0;
+  if(millis()-start>=200)desk_log_event(DESK_LOG_WARN,"AUDIO_STARVATION",millis()-start,buffered(),"HLS decoder waited for data");
   return readNonBlock(data, len);
 }
 
@@ -116,10 +123,14 @@ bool BestRadioHlsSource::fetchText(const String &url, size_t limit) {
     cfg.buffer_size = 2048;
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) { xSemaphoreGive(httpMutex_); return false; }
+    const uint32_t started=millis();
     const esp_err_t result = esp_http_client_perform(client);
     lastHttpStatus_ = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
     xSemaphoreGive(httpMutex_);
+    if(result!=ESP_OK || lastHttpStatus_!=200)
+      desk_log_event(DESK_LOG_WARN,"HLS_PLAYLIST_ERROR",result,lastHttpStatus_,"playlist / station lookup");
+    else if(millis()-started>=2500)desk_log_event(DESK_LOG_WARN,"HLS_PLAYLIST_SLOW",millis()-started,sink.size,"");
     if (result == ESP_OK && lastHttpStatus_ == 200 && !sink.overflow && sink.size) return true;
     Serial.printf("[HLS] playlist failed attempt=%d error=%s http=%d overflow=%d\n",
                   attempt + 1, esp_err_to_name(result), lastHttpStatus_, sink.overflow);
@@ -252,9 +263,12 @@ bool BestRadioHlsSource::processPacket(const uint8_t *packet) {
 }
 
 bool BestRadioHlsSource::downloadSegment(const String &segment) {
+  const uint32_t queued=millis();
   while (xSemaphoreTake(httpMutex_, pdMS_TO_TICKS(100)) != pdTRUE)
     if (stop_.load()) return false;
   if (stop_.load()) { xSemaphoreGive(httpMutex_); return false; }
+  const uint32_t started=millis();
+  if(started-queued>=1000)desk_log_event(DESK_LOG_INFO,"HLS_HTTP_WAIT",started-queued,0,"shared HTTP gate; not network transfer time");
   lastHttpStatus_ = 0;
   esp_http_client_config_t cfg = {};
   cfg.url = segment.c_str();
@@ -287,6 +301,10 @@ bool BestRadioHlsSource::downloadSegment(const String &segment) {
   esp_http_client_close(client);
   esp_http_client_cleanup(client);
   xSemaphoreGive(httpMutex_);
+  const uint32_t elapsed=millis()-started;
+  if(!stop_.load() && (!okay || !complete))desk_log_event(DESK_LOG_WARN,"HLS_SEGMENT_ERROR",lastHttpStatus_,elapsed,"");
+  else if(!stop_.load() && elapsed>=2000 && packetCount*188ULL*1000<32768ULL*elapsed)
+    desk_log_event(DESK_LOG_WARN,"NETWORK_SLOW",elapsed,packetCount*188,"HLS bytes / elapsed_ms; below 32KiB/s");
   return okay && complete && packetCount && audioPid_ != 0xffff;
 }
 

@@ -6,6 +6,7 @@ static constexpr int kHomeStockContentW = kHomeContentW - 16;
 static constexpr int kHomeStockH = 104;
 static constexpr int kHomeTabHeight = 172 / kHomeCarouselCount;
 static constexpr uint32_t kHomeBackground = 0x070B0A;
+static void refreshHomeRows(uint32_t now);
 
 #include "weather_icons.inc"
 
@@ -261,6 +262,7 @@ static void homeVisible(lv_obj_t *item, bool visible) {
 }
 
 static void showHomeCarousel(uint8_t page) {
+  if(page>=kHomeCarouselCount)return;
   const bool enteringMp3 = homeCarouselPage != kHomeMp3Page && page == kHomeMp3Page;
   homeCarouselPage = page;
   if (homeCarouselPage == 0) lastWeatherFlip = millis();
@@ -280,6 +282,7 @@ static void showHomeCarousel(uint8_t page) {
   }
   if (enteringMp3 && !mp3TrackCount) requestMp3Scan();
   if (homeCarouselPage == kHomeMp3Page) updateMp3Screen();
+  refreshHomeRows(millis());
 }
 
 static void selectHomeCarousel(lv_event_t *event) {
@@ -341,7 +344,15 @@ static void refreshHomeRows(uint32_t now) {
     weatherSlot = (weatherSlot + 1) % cfg.weatherCount;
     lastWeatherFlip = now;
   }
-  setWeatherPage(weatherPageA);
+  if(homeCarouselPage==0){
+    setWeatherPage(weatherPageA);
+    updateHomeWeatherIcon();
+    String weatherTitle=kCounties[cfg.counties[weatherSlot]];
+    if(weatherTitle.length()<=6)weatherTitle+=" · 天氣";
+    homeSetText(homeWeatherTitle,weatherTitle);
+  }
+  if(homeCarouselPage==2)updateHomeRadio();
+  if(homeCarouselPage!=1)return;
   if (!footerAnimating) setFooterPage(footerPageA, footerPage);
   if (!cfg.carouselPaused && homeCarouselPage == 1 && !footerAnimating &&
       (uint32_t)(now - lastFooterFlip) >= rotateMs) advanceFooter(nullptr);
@@ -358,11 +369,6 @@ static void refreshHomeRows(uint32_t now) {
     lv_obj_set_style_text_color(homeStockChangeLabel, lv_color_hex(changeColor), 0);
     renderedChangeColor = changeColor;
   }
-  updateHomeWeatherIcon();
-  updateHomeRadio();
-  String weatherTitle = kCounties[cfg.counties[weatherSlot]];
-  if (weatherTitle.length() <= 6) weatherTitle += " · 天氣";
-  homeSetText(homeWeatherTitle, weatherTitle);
 }
 
 static lv_obj_t *homeControl(lv_obj_t *parent, const char *icon, const char *caption,

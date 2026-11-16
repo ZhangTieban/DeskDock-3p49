@@ -40,4 +40,14 @@ int main() {
   assert(freeCalls == 2);
   otaTlsOwner.store(nullptr);
   assert(callocHook(1, 16384) == &internalMemory);
+  // Only an explicitly registered background HTTP task joins the PSRAM path.
+  externalFailure=false;
+  backgroundTlsOwner.store(&otherTask);
+  currentTask=&otherTask;
+  const auto otaCount=otaTlsPsramAllocations.load();
+  assert(callocHook(1,16384)==&externalMemory);
+  assert(otaTlsPsramAllocations.load()==otaCount);
+  assert(callocHook(1,128)==&internalMemory);
+  backgroundTlsOwner.store(nullptr);
+  assert(callocHook(1,16384)==&internalMemory);
 }

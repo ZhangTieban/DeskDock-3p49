@@ -2,8 +2,30 @@
 
 static constexpr int kPetWidth = 296, kPetHeight = 32;
 static constexpr uint32_t kPetTickMs = 80;
-static int homePetMinute = -1;
-static void setHomeDogTime(int minute) { homePetMinute = minute; }
+static PetDate homePetDate{0,0,0};
+static int homePetSecond=-1;
+static uint32_t homePetClockAt=0,homePetDateKey=0;
+static PetDaySchedule homePetPlan;
+static bool homePetPlanValid=false;
+static std::atomic<int> homePetTestAction{-1};
+static std::atomic<uint32_t> homePetTestUntil{0};
+static void setHomeDogTime(const tm *value) {
+  if(!value){homePetSecond=-1;return;}
+  homePetDate={value->tm_year+1900,value->tm_mon+1,value->tm_mday};
+  homePetSecond=value->tm_hour*3600+value->tm_min*60+value->tm_sec;homePetClockAt=millis();
+  const uint32_t key=homePetDate.year*10000+homePetDate.month*100+homePetDate.day;
+  if(key!=homePetDateKey){
+    homePetPlanValid=buildPetDaySchedule(homePetDate,homePetPlan);homePetDateKey=key;
+    desk_log_event(homePetPlanValid?DESK_LOG_INFO:DESK_LOG_ERROR,
+      homePetPlanValid?"PET_PLAN_READY":"PET_PLAN_FAILED",key,homePetPlan.count,"daily schedule; no NVS writes");
+    Serial.printf("[PET] date=%lu periods=%u valid=%d stack=%u\n",(unsigned long)key,
+      homePetPlan.count,homePetPlanValid,(unsigned)uxTaskGetStackHighWaterMark(nullptr));
+  }
+}
+static void setHomePetTest(unsigned action) {
+  homePetTestUntil.store(millis()+30000);homePetTestAction.store(action);
+  desk_log_event(DESK_LOG_INFO,"SELF_TEST_PET",action,30000,"explicit USB preview; auto resumes daily schedule");
+}
 
 static void drawPetPixel(lv_draw_buf_t *buffer, int x, int y, uint32_t rgb) {
   if (x < 0 || x >= kPetWidth || y < 0 || y >= kPetHeight) return;
@@ -13,6 +35,20 @@ static void drawPetPixel(lv_draw_buf_t *buffer, int x, int y, uint32_t rgb) {
 
 static void drawPetSprite(lv_draw_buf_t *buffer, unsigned index, int x, int y, bool flip) {
   const auto &sprite = kPetSprites[index];
+  if(sprite.encodedBytes){
+    const auto *bytes=reinterpret_cast<const uint8_t *>(sprite.pixels);
+    const unsigned total=sprite.w*sprite.h;unsigned pos=0;
+    for(unsigned i=0;i+1<sprite.encodedBytes&&pos<total;i+=2){
+      const unsigned count=bytes[i],color=bytes[i+1];
+      if(!count||count>total-pos||color>16)break;
+      if(color<16)for(unsigned n=0;n<count;n++){
+        const unsigned pixel=pos+n,column=pixel%sprite.w;
+        drawPetPixel(buffer,x+(flip?sprite.w-1-column:column),y+pixel/sprite.w,kPetPalette[color]);
+      }
+      pos+=count;
+    }
+    return;
+  }
   for (int row = 0; row < sprite.h; ++row) {
     for (int column = 0; column < sprite.w; ++column) {
       const char c = sprite.pixels[row * sprite.w + (flip ? sprite.w - 1 - column : column)];
@@ -61,14 +97,23 @@ static void animateHomeDog(lv_timer_t *timer) {
   if (lv_screen_active() != homeScreen) { lastTouch = homePetTouch.load(); return; }
   refreshHomeAudioSource();
   auto *canvas = static_cast<lv_obj_t *>(lv_timer_get_user_data(timer));
-  static unsigned dayIndex = 0;
-  static constexpr PetAction daytime[] = {PetAction::Walk, PetAction::Run, PetAction::Ball,
-      PetAction::Sit, PetAction::Fetch, PetAction::Pet, PetAction::Frisbee, PetAction::Tug};
-  static PetAction previous = PetAction::Walk;
-  const PetAction action = scheduledPetAction(homePetMinute, daytime[dayIndex]);
+  static PetAction previous = PetAction::Lie;
+  const PetPeriod *period=homePetPlanValid&&homePetSecond>=0?petPeriodAt(homePetPlan,homePetSecond):nullptr;
+  PetAction action=period?period->action:scheduledPetAction(homePetSecond<0?-1:homePetSecond/60,PetAction::Lie);
+  uint32_t elapsed=period?homePetSecond-period->start:0;
+  if(action==PetAction::BathPrepare)action=petBathPhase(elapsed);
+  const int test=homePetTestAction.load();
+  const bool testing=test>=0&&(int32_t)(homePetTestUntil.load()-millis())>0;
+  if(testing)action=(PetAction)test;
+  else if(test>=0)homePetTestAction.store(-1);
   if (action != previous) { actionTick = 0; previous = action; }
   const unsigned index = static_cast<unsigned>(action);
-  const PetFrame &frame = kPetActions[index][actionTick % kPetFrameCounts[index]];
+  unsigned frameIndex=actionTick%kPetFrameCounts[index];
+  if(!testing&&period&&(action==PetAction::Spin||action==PetAction::Stretch)){
+    const uint32_t withinSecond=std::min(999U,(uint32_t)(millis()-homePetClockAt));
+    frameIndex=std::min((elapsed*1000+withinSecond)/kPetTickMs,(uint32_t)kPetFrameCounts[index]-1);
+  }
+  const PetFrame &frame = kPetActions[index][frameIndex];
   const uint32_t touch = homePetTouch.load();
   if (touch != lastTouch) { lastTouch = touch; heartUntil = tick + 30; }
   const bool heart = tick < heartUntil;
@@ -89,15 +134,13 @@ static void animateHomeDog(lv_timer_t *timer) {
     drawPetSprite(buffer, frame.girlPose + 9, frame.girlX, 0, frame.girlFlip);
     drawPetSprite(buffer, frame.pose, frame.x, frame.y, frame.flip);
     drawPetSprite(buffer, frame.toy, frame.toyX, frame.toyY, false);
-    if (heart) drawPetSprite(buffer, 20, frame.x + 12, 4 + (tick / 5) % 2, false);
+    if (heart) drawPetSprite(buffer, 20, frame.heartX>=0?frame.heartX:frame.x+12, 4 + (tick / 5) % 2, false);
     lv_obj_invalidate(canvas);
     rendered = frame; hasRendered = true; hadHeart = heart;
   }
   ++tick;
   if (++actionTick >= kPetFrameCounts[index]) {
     actionTick = 0;
-    if (action != PetAction::Sleep && action != PetAction::Eat && action != PetAction::Leash)
-      dayIndex = (dayIndex + 1) % (sizeof(daytime) / sizeof(daytime[0]));
   }
 }
 

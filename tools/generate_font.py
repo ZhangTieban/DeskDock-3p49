@@ -78,7 +78,7 @@ content = "// Generated from Noto Sans TC, D-DIN, Noto Sans Symbols (SIL OFL). D
 content += emit_font(16, ASCII + TEXT + SOURCE_UNICODE) + "\n"
 content += emit_font(16, ASCII + TEXT + SOURCE_UNICODE, suffix="_bold", weight=700) + "\n"
 content += emit_font(14, "最高最低成交量股降雨濕度體感風速日落認識阿喵周年生日快樂~UV AMPM0123456789.,:/%°Ckmh-", suffix="_bold", weight=700) + "\n"
-content += emit_font(10, "上一台播放暫停下降雨更新預報資料退版啟動確認中完成已未回到目前上次目標， Wi-Fi·0123456789.:/%", suffix="_bold", weight=700) + "\n"
+content += emit_font(10, "上一台播放暫停下降雨更新預報資料退版啟動確認中完成已未回到目前上次目標， Wi-Fi·0123456789.:/%V", suffix="_bold", weight=700) + "\n"
 content += emit_font(18, "0123456789 /-", DIN_REGULAR) + "\n"
 content += emit_font(20, ASCII + TEXT + SOURCE_UNICODE) + "\n"
 content += emit_font(20, "0123456789.,+-°C%", HANKEN, suffix="_bold", weight=700) + "\n"

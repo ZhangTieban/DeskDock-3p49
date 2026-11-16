@@ -12,7 +12,7 @@ class BestRadioHlsSource final : public AudioFileSource {
  public:
   BestRadioHlsSource() = default;
   ~BestRadioHlsSource() override;
-  bool begin(uint8_t channel, SemaphoreHandle_t httpMutex);
+  bool begin(uint8_t channel, SemaphoreHandle_t httpMutex, const std::atomic<int> *command=nullptr);
   bool close() override;
   bool isOpen() override;
   uint32_t read(void *data, uint32_t len) override;
@@ -38,6 +38,7 @@ class BestRadioHlsSource final : public AudioFileSource {
   static String resolveUrl(const String &base, const String &relative);
 
   uint8_t channel_ = 0;
+  const std::atomic<int> *command_ = nullptr;
   uint8_t *ring_ = nullptr;
   char *text_ = nullptr;
   SemaphoreHandle_t done_ = nullptr;

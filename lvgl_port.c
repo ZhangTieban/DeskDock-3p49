@@ -15,6 +15,7 @@
 #include "i2c_bsp.h"
 #include "touch_input.h"
 #include "display_rotate.h"
+#include "event_log.h"
 
 extern void desk_touch_activity(void);
 extern void desk_touch_report(int x, int y);
@@ -31,6 +32,12 @@ static SemaphoreHandle_t frame_done_semaphore;
 static SemaphoreHandle_t first_frame_semaphore;
 static lv_draw_buf_t display_buffers[2];
 static TaskHandle_t lvgl_task_handle;
+static int64_t render_started;
+static uint32_t render_last_us;
+static void report_render(lv_event_t *event) {
+  if(lv_event_get_code(event)==LV_EVENT_RENDER_START)render_started=esp_timer_get_time();
+  else if(render_started)render_last_us=(uint32_t)(esp_timer_get_time()-render_started);
+}
 static QueueHandle_t flush_queue;
 typedef struct {
   lv_display_t *display;
@@ -276,6 +283,8 @@ void example_lvgl_port_task(void *arg)
       const int64_t handler_started = esp_timer_get_time();
       task_delay_ms = lv_timer_handler();
       desk_ui_report((uint32_t)(esp_timer_get_time() - handler_started));
+      desk_log_ui((uint32_t)(esp_timer_get_time()-handler_started),render_last_us);
+      render_last_us=0;
       //Release the mutex
       lvgl_port_unlock();
     }
@@ -357,6 +366,8 @@ void lvgl_port_init(void)
   lv_init();
 
   lv_display_t * disp = lv_display_create(EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);  /* 以水平和垂直分辨率（像素）进行基本初始化 */
+  lv_display_add_event_cb(disp,report_render,LV_EVENT_RENDER_START,NULL);
+  lv_display_add_event_cb(disp,report_render,LV_EVENT_RENDER_READY,NULL);
   lv_display_set_flush_cb(disp, example_lvgl_flush_cb);                           /* 设置刷新回调函数以绘制到显示屏 */
   lv_display_set_flush_wait_cb(disp, display_flush_wait);
   // Limit panel traffic to about 30 frames/s; input still polls every 10 ms.

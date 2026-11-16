@@ -42,6 +42,8 @@ extern "C" {
 #include "settings_policy.h"
 #include "ota_tls_memory.h"
 #include "operation_cue_policy.h"
+#include "event_log.h"
+#include "event_log_policy.h"
 
 // The panel and touch driver come from the supplied Waveshare 3.49 example.
 static constexpr int kWidth = 640;
@@ -189,6 +191,8 @@ static TaskHandle_t networkTaskHandle = nullptr;
 static constexpr uint32_t kFetchWeather = 1;
 static constexpr uint32_t kFetchMarkets = 2;
 static constexpr uint32_t kFetchIntraday = 4;
+static constexpr uint32_t kProbeWeather = 8; // Explicit USB self-test; no settings/cache writes.
+static std::atomic<int> probeWeatherCounty{-1};
 static String stockCodes[kMaxStocks];
 static String stockValues[kMaxStocks];
 static String stockStamps[kMaxStocks];
@@ -200,6 +204,12 @@ static uint8_t stockCount = 1;
 static uint8_t stockPage = 0;
 static uint32_t stockUiRevision = 0;
 static std::atomic<bool> networkRefresh{true};
+static std::atomic<bool> backgroundAfterRadio{false};
+static std::atomic<int> weatherPrioritySlot{-1};
+static std::atomic<bool> homeWeatherDirty{false};
+static std::atomic<int> pendingUiTestSteps{0};
+static bool backgroundHttpDeferred = false; // Owned only by networkTask.
+static uint32_t backgroundRetryRequests=0,activeHttpRequest=0,backgroundDeferredAt=0;
 static uint32_t lastWeatherAttempt = 0, lastStockAttempt = 0, lastIntradayAttempt = 0;
 static uint32_t lastInputMs = 0, lastBatteryMs = 0;
 static bool intradayWindow();
@@ -333,6 +343,7 @@ static lv_obj_t *editorText, *editorKeyboard;
 static lv_obj_t *editorReturnScreen;
 static void openStocks(lv_event_t *);
 static void openRadio(lv_event_t *);
+static void refreshHomeRows(uint32_t now);
 static void selectSettingsPage(uint8_t index);
 static void requestMp3Scan();
 static void updateMp3Screen();
@@ -380,7 +391,10 @@ static void setSystemFromRtc() {
   settimeofday(&tv, nullptr);
 }
 
-static void onNtpSync(struct timeval *) { ntpSynced.store(true); }
+static void onNtpSync(struct timeval *) {
+  ntpSynced.store(true);
+  desk_log_event(DESK_LOG_INFO,"TIME_SYNC",0,0,"NTP wall-clock anchor");
+}
 
 static bool parseStockCodes(const String &input) {
   String parsed[kMaxStocks];
@@ -756,6 +770,8 @@ static void pollPhysicalButton(PhysicalButton &key, uint32_t now, bool powerKey)
 }
 
 static void powerOff() {
+  desk_log_event(DESK_LOG_INFO,"SHUTDOWN",0,0,"power button");
+  desk_log_flush(1500);
   flushPendingSettings(true);
   Serial.println("[POWER] releasing battery power latch");
   Serial.flush();
@@ -1086,6 +1102,9 @@ static void radioAudioTask(void *) {
       }
       audioStreamClosing.store(true);
       radioState.store(mp3Requested ? 0 : command > 0 ? 1 : command == -2 ? 3 : 0);
+      desk_log_event(command == -2 ? DESK_LOG_ERROR : DESK_LOG_INFO,
+                     command > 0 ? "AUDIO_REQUEST" : command == -2 ? "AUDIO_FAILED" : "AUDIO_STOP",
+                     command, previousRadioState, "");
       mp3State.store(mp3Requested ? 1 : 0);
       closeStream();
       radioLinkLost.store(false);
@@ -1155,6 +1174,7 @@ static void radioAudioTask(void *) {
           }
         }
         if (mp3State.load() != 2) {
+          desk_log_event(DESK_LOG_ERROR,"MP3_OPEN_FAILED",playingMp3Track,0,"SD open / decoder / I2S");
           closeStream();
           restoreI2s();
           mp3State.store(4);
@@ -1184,7 +1204,7 @@ static void radioAudioTask(void *) {
           if (command >= 6) {
             hls = new BestRadioHlsSource();
             source = hls;
-            opened = hls && hls->begin(command - 6, networkHttpMutex);
+            opened = hls && hls->begin(command - 6, networkHttpMutex, &radioCommand);
           } else {
             auto *icy = new AudioFileSourceICYStream();
             source = icy;
@@ -1240,12 +1260,18 @@ static void radioAudioTask(void *) {
                 output->SetPinout(15, 46, 45, 7) &&
                 decoder->begin(audioSource, output) && output->codecConfigured()) {
               radioState.store(2);
+              desk_log_event(DESK_LOG_INFO,"RADIO_PLAYING",command,
+                             hls ? hls->buffered() : buffer->getFillLevel(),"");
               playingSinceMs = millis();
               Serial.printf("[RADIO] playing station=%d\n", command);
             } else radioState.store(3);
           } else radioState.store(3);
           if (radioState.load() == 3) {
-            Serial.printf("[RADIO] stream failed station=%d\n", command);
+            const bool cancelled=radioCommand.load()!=-1;
+            if (!cancelled)
+              desk_log_event(DESK_LOG_ERROR,"RADIO_CONNECT_FAILED",command,0,"");
+            Serial.printf(cancelled ? "[RADIO] connection cancelled station=%d\n" :
+                          "[RADIO] stream failed station=%d\n", command);
             int expected = -1;
             radioCommand.compare_exchange_strong(expected, -2);
           }
@@ -1270,7 +1296,10 @@ static void radioAudioTask(void *) {
       if (radioLinkLost.load() || WiFi.status() != WL_CONNECTED ||
           !output || !output->codecConfigured() || !decoder->isRunning() ||
           !decoder->loop() || !output->codecConfigured() || radioLinkLost.load()) {
-        Serial.println("[RADIO] stream ended");
+        const bool cancelled = radioCommand.load() != -1;
+        Serial.println(cancelled ? "[RADIO] cancelled for new command" : "[RADIO] stream ended");
+        desk_log_event(cancelled ? DESK_LOG_INFO : DESK_LOG_ERROR,
+                       cancelled ? "RADIO_CANCELLED" : "RADIO_STREAM_ENDED",activeRadioStation,0,"");
         if ((uint32_t)(millis() - playingSinceMs) >= 60000) retryCount = 0;
         int expected = -1;
         radioCommand.compare_exchange_strong(expected, -2);
@@ -1304,9 +1333,11 @@ static void radioAudioTask(void *) {
         }
       }
     }
-    if (deskCueNeedsRestore(driverSwitched,decoder != nullptr,
+    if (radioCommand.load()==-1 && deskCueNeedsRestore(driverSwitched,decoder != nullptr,
                             radioState.load(),mp3State.load()) &&
         (uint32_t)(millis()-lastCueRestoreMs)>=1000) restoreI2s();
+    desk_log_audio(radioStation.load(),radioState.load(),hls ? hls->buffered() :
+                   buffer ? buffer->getFillLevel() : 0);
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
@@ -1346,7 +1377,8 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, int x, int y, int w,
 }
 
 static void goHome(lv_event_t *) {
-  lv_screen_load(homeScreen); lastInputMs = millis(); Serial.println("[UI] home");
+  lv_screen_load(homeScreen); refreshHomeRows(millis());
+  lastInputMs = millis(); Serial.println("[UI] home");
 }
 static void goSettings(lv_event_t *) {
   lv_screen_load(settingsScreen); lastInputMs = millis(); Serial.println("[UI] settings");
@@ -1930,6 +1962,8 @@ static void setWeatherCounty(uint8_t slot, int county) {
   weatherData[slot] = WeatherData();
   weatherData[slot].summary = "更新中...";
   weatherSlot = slot;
+  weatherPrioritySlot.store(slot);
+  homeWeatherDirty.store(true);
   lastWeatherFlip = millis();
   deferSetting(4 + slot, cfg.counties[slot]);
   lastWeatherAttempt = millis();
@@ -2164,6 +2198,10 @@ static void settingsIoTask(void *) {
       lastTouchReport = millis();
       uint32_t reads, errors, recoveries, overflows;
       lvgl_port_touch_stats(&reads, &errors, &recoveries, &overflows);
+      static uint32_t previousErrors=0,previousOverflows=0;
+      if(errors!=previousErrors)desk_log_event(DESK_LOG_WARN,"TOUCH_IO_ERRORS",errors-previousErrors,recoveries,"5 second aggregated I2C counters");
+      if(overflows!=previousOverflows)desk_log_event(DESK_LOG_WARN,"TOUCH_QUEUE_OVERFLOW",overflows-previousOverflows,0,"");
+      previousErrors=errors;previousOverflows=overflows;
       Serial.printf("[TOUCH] reads=%u errors=%u recoveries=%u overflows=%u\n",
                     (unsigned)reads, (unsigned)errors, (unsigned)recoveries, (unsigned)overflows);
     }
@@ -2534,14 +2572,40 @@ static bool radioNeedsNetwork() {
   const int command = radioCommand.load();
   return state == 1 || state == 2 || (command > 0 && command <= kRadioStations);
 }
+static bool backgroundCacheAllowed() {
+  if(!radioNeedsNetwork())return true;
+  // The old build never wrote remote caches during radio playback. Preserve
+  // that property: flash erase/GC can pause both cores and interrupt audio/UI.
+  backgroundAfterRadio.store(true);return false;
+}
 
-static void takeBackgroundHttpMutex() {
-  for (;;) {
-    while (radioNeedsNetwork()) vTaskDelay(pdMS_TO_TICKS(100));
-    if (xSemaphoreTake(networkHttpMutex, pdMS_TO_TICKS(100)) != pdTRUE) continue;
-    if (!radioNeedsNetwork()) return;
+static bool takeBackgroundHttpMutex() {
+  const uint32_t started=millis();
+  while (millis()-started<1000 && WiFi.status()==WL_CONNECTED) {
+    const int state=radioState.load(),command=radioCommand.load();
+    const uint32_t cushion=radioStation.load()>=6 ? 131072 : 65536;
+    const bool ready=deskBackgroundHttpReady(state==2,
+        state==1 || (command>0 && command<=kRadioStations),desk_log_buffered(),
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),cushion);
+    if (!ready || xSemaphoreTake(networkHttpMutex,pdMS_TO_TICKS(50))!=pdTRUE) {
+      vTaskDelay(pdMS_TO_TICKS(50));continue;
+    }
+    // A station change can arrive while waiting for the HLS producer.
+    const int next=radioCommand.load();
+    if (radioState.load()!=1 && !(next>0 && next<=kRadioStations) &&
+        (radioState.load()!=2 || desk_log_buffered()>=cushion)) {
+      if(backgroundDeferredAt){desk_log_event(DESK_LOG_INFO,"HTTP_RESUMED",
+        millis()-backgroundDeferredAt,desk_log_buffered(),"");backgroundDeferredAt=0;}
+      return true;
+    }
     xSemaphoreGive(networkHttpMutex);
   }
+  backgroundHttpDeferred=true;
+  backgroundRetryRequests|=activeHttpRequest;
+  if(!backgroundDeferredAt){backgroundDeferredAt=millis();
+    desk_log_event(DESK_LOG_INFO,"HTTP_DEFERRED",activeHttpRequest,desk_log_buffered(),"waiting for audio/memory budget");}
+  return false;
 }
 
 static esp_err_t httpEvent(esp_http_client_event_t *event) {
@@ -2553,9 +2617,11 @@ static esp_err_t httpEvent(esp_http_client_event_t *event) {
 }
 
 static bool getJson(const String &url, size_t limit, String *body) {
-  takeBackgroundHttpMutex();
+  backgroundHttpDeferred=false;
+  if (!takeBackgroundHttpMutex()) return false;
   HttpBuffer buf; buf.limit = limit;
   if (!buf.body.reserve(limit < 200000 ? limit : 200000)) {
+    desk_log_event(DESK_LOG_ERROR,"HTTP_MEMORY",limit,0,"response allocation");
     xSemaphoreGive(networkHttpMutex);
     return false;
   }
@@ -2564,15 +2630,42 @@ static bool getJson(const String &url, size_t limit, String *body) {
   config.event_handler = httpEvent;
   config.user_data = &buf;
   config.crt_bundle_attach = esp_crt_bundle_attach;
-  config.timeout_ms = 10000;
+  config.timeout_ms = radioState.load()==2 ? 3000 : 10000;
+  config.is_async = url.startsWith("https://");
   config.buffer_size = 4096;
   esp_http_client_handle_t client = esp_http_client_init(&config);
-  if (!client) { xSemaphoreGive(networkHttpMutex); return false; }
-  const esp_err_t result = esp_http_client_perform(client);
+  if (!client) {
+    desk_log_event(DESK_LOG_ERROR,"HTTP_CLIENT_MEMORY",0,0,"client initialization");
+    xSemaphoreGive(networkHttpMutex); return false;
+  }
+  const uint32_t started=millis();
+  if(config.is_async)desk_log_async_http(true);
+  esp_err_t result;
+  do {
+    result=esp_http_client_perform(client);
+    if(result!=ESP_ERR_HTTP_EAGAIN)break;
+    if(config.is_async && (millis()-started>=(radioState.load()==2 ? 5000U : 10000U) ||
+       (radioState.load()==2 && desk_log_buffered()<32768))){result=ESP_ERR_TIMEOUT;break;}
+    if(radioState.load()==1 || (radioCommand.load()>0 && radioCommand.load()<=kRadioStations)){
+      backgroundHttpDeferred=true;backgroundRetryRequests|=activeHttpRequest;result=ESP_ERR_INVALID_STATE;break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }while(config.is_async);
   const int status = esp_http_client_get_status_code(client);
   const int socketError = result == ESP_OK ? 0 : esp_http_client_get_errno(client);
   esp_http_client_cleanup(client);
+  if(config.is_async)desk_log_async_http(false);
   xSemaphoreGive(networkHttpMutex);
+  const char *endpoint=url.indexOf("open-meteo.com")>=0 ? "weather" :
+                       url.indexOf("twse.com.tw")>=0 ? "twse" : "market";
+  char detail[96];snprintf(detail,sizeof(detail),"%s ms=%lu bytes=%u errno=%d overflow=%d",
+    endpoint,(unsigned long)(millis()-started),(unsigned)buf.body.length(),socketError,buf.overflow);
+  if(backgroundHttpDeferred){
+    desk_log_event(DESK_LOG_INFO,"HTTP_CANCELLED",result,status,"new audio command; request requeued");
+    return false;
+  }else if(result!=ESP_OK || status!=200 || buf.overflow)
+    desk_log_event(DESK_LOG_ERROR,"HTTP_ERROR",result,status,detail);
+  else if(millis()-started>=2500)desk_log_event(DESK_LOG_WARN,"HTTP_SLOW",millis()-started,buf.body.length(),endpoint);
   if (result != ESP_OK || status != 200 || buf.overflow) {
     Serial.printf("[HTTP] %s failed: %d status=%d errno=%d overflow=%d\n",
                   url.c_str(), result, status, socketError, buf.overflow);
@@ -2626,7 +2719,10 @@ static bool fetchWeather(WeatherData &item, int county) {
   String body;
   if (!getJson(url, 16000, &body)) { item.summary = "天氣資料取得失敗"; return false; }
   cJSON *root = cJSON_Parse(body.c_str());
-  if (!root) { item.summary = "天氣資料格式錯誤"; return false; }
+  if (!root) {
+    desk_log_event(DESK_LOG_ERROR,"WEATHER_JSON_ERROR",county,body.length(),"");
+    item.summary = "天氣資料格式錯誤"; return false;
+  }
   const cJSON *daily = cJSON_GetObjectItemCaseSensitive(root, "daily");
   const cJSON *current = cJSON_GetObjectItemCaseSensitive(root, "current");
   const cJSON *low = cJSON_GetArrayItem(
@@ -2934,7 +3030,17 @@ static esp_err_t futuresEvent(esp_http_client_event_t *event) {
 }
 
 static bool fetchNight(RemoteData &remote) {
-  takeBackgroundHttpMutex();
+  backgroundHttpDeferred=false;
+  const uint32_t retryBefore=backgroundRetryRequests;
+  auto deferForAudio=[](){
+    backgroundHttpDeferred=true;backgroundAfterRadio.store(true);
+    desk_log_event(DESK_LOG_INFO,"NIGHT_DEFERRED",0,0,"large report waits until radio stops; current cache retained");
+  };
+  if(radioNeedsNetwork()){deferForAudio();return false;}
+  if (!takeBackgroundHttpMutex()) {
+    if(radioNeedsNetwork()){backgroundRetryRequests=retryBefore;deferForAudio();}
+    return false;
+  }
   FuturesStream stream;
   if (!stream.object.reserve(1024)) {
     xSemaphoreGive(networkHttpMutex);
@@ -2946,7 +3052,8 @@ static bool fetchNight(RemoteData &remote) {
   config.event_handler = futuresEvent;
   config.user_data = &stream;
   config.crt_bundle_attach = esp_crt_bundle_attach;
-  config.timeout_ms = 15000;
+  config.timeout_ms = radioState.load()==2 ? 3000 : 15000;
+  config.is_async = true;
   config.buffer_size = 4096;
   esp_http_client_handle_t client = esp_http_client_init(&config);
   if (!client) {
@@ -2954,12 +3061,28 @@ static bool fetchNight(RemoteData &remote) {
     remote.night = "夜盤資料取得失敗";
     return false;
   }
-  const esp_err_t result = esp_http_client_perform(client);
+  const uint32_t started=millis();
+  if(config.is_async)desk_log_async_http(true);
+  esp_err_t result;
+  do{
+    result=esp_http_client_perform(client);
+    if(result!=ESP_ERR_HTTP_EAGAIN)break;
+    if(radioNeedsNetwork()){deferForAudio();result=ESP_ERR_INVALID_STATE;break;}
+    if(weatherPrioritySlot.load()>=0){
+      backgroundHttpDeferred=true;backgroundRetryRequests|=activeHttpRequest;
+      result=ESP_ERR_INVALID_STATE;break;
+    }
+    if(millis()-started>=60000){result=ESP_ERR_TIMEOUT;break;}
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }while(config.is_async);
   const int status = esp_http_client_get_status_code(client);
   const int socketError = result == ESP_OK ? 0 : esp_http_client_get_errno(client);
   esp_http_client_cleanup(client);
+  if(config.is_async)desk_log_async_http(false);
   xSemaphoreGive(networkHttpMutex);
+  if(backgroundHttpDeferred){desk_log_event(DESK_LOG_INFO,"HTTP_CANCELLED",result,status,"night report yielded to audio / selected weather");return false;}
   if (result != ESP_OK || status != 200 || stream.overflow || stream.depth != 0) {
+    desk_log_event(DESK_LOG_ERROR,"FUTURES_HTTP_ERROR",result,status,"night market response");
     Serial.printf("[NIGHT] failed: %d status=%d errno=%d bytes=%u\n",
                   result, status, socketError, (unsigned)stream.received);
     remote.night = "夜盤資料取得失敗";
@@ -2975,10 +3098,15 @@ static bool fetchNight(RemoteData &remote) {
 }
 
 static void networkTask(void *) {
+  backgroundTlsOwner.store(xTaskGetCurrentTaskHandle());
   for (;;) {
     uint32_t requests = 0;
     xTaskNotifyWait(0, UINT32_MAX, &requests, portMAX_DELAY);
     if (WiFi.status() != WL_CONNECTED) continue;
+    uint32_t retryRequests=0;
+    backgroundRetryRequests=0;
+    if((requests&kFetchWeather) && (requests&kFetchIntraday))retryRequests|=kFetchIntraday;
+    backgroundHttpDeferred=false;
     Serial.printf("[NETWORK] start heap=%u largest=%u min=%u psram=%u task_stack=%u\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -2986,7 +3114,18 @@ static void networkTask(void *) {
                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                   (unsigned)uxTaskGetStackHighWaterMark(nullptr));
 
-    if (requests & kFetchIntraday) {
+    if(requests&kProbeWeather){
+      activeHttpRequest=kProbeWeather;backgroundHttpDeferred=false;
+      const int county=probeWeatherCounty.load();
+      if(county>=0 && county<kCountyCount){
+        WeatherData result;const bool valid=fetchWeather(result,county);
+        if(backgroundHttpDeferred)retryRequests|=kProbeWeather;
+        else desk_log_event(valid ? DESK_LOG_INFO : DESK_LOG_WARN,
+          "SELF_TEST_WEATHER_RESULT",county,valid,kCounties[county]);
+      }
+    }
+    if ((requests & kFetchIntraday) && !(requests & kFetchWeather)) {
+      activeHttpRequest=kFetchIntraday;
       String codes[kMaxStocks];
       uint8_t count;
       while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
@@ -3015,20 +3154,32 @@ static void networkTask(void *) {
     }
 
     if (requests & kFetchWeather) {
-      for (int slot = 0; slot < kWeatherSlots && WiFi.status() == WL_CONNECTED; ++slot) {
+      activeHttpRequest=kFetchWeather;
+      const int priority=weatherPrioritySlot.exchange(-1);
+      for (int order=-1; order<kWeatherSlots && WiFi.status()==WL_CONNECTED; ++order) {
+        const int slot=order<0 ? priority : order;
+        if(slot<0 || slot>=kWeatherSlots || (order>=0 && slot==priority)) continue;
         while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
-        if (slot>=cfg.weatherCount) { lvgl_port_unlock(); break; }
+        if (slot>=cfg.weatherCount) { lvgl_port_unlock(); continue; }
         const int county = cfg.counties[slot];
         lvgl_port_unlock();
         WeatherData result;
+        backgroundHttpDeferred=false;
         const bool valid = fetchWeather(result, county);
+        if(backgroundHttpDeferred){
+          retryRequests|=kFetchWeather;
+          int expected=-1;
+          weatherPrioritySlot.compare_exchange_strong(expected,slot);
+          break;
+        }
         while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
         const bool current = slot<cfg.weatherCount && cfg.counties[slot] == county;
         if (current && (valid || weatherData[slot].stamp.isEmpty())) {
           weatherData[slot] = result;
+          homeWeatherDirty.store(true);
         }
         lvgl_port_unlock();
-        if (current && valid) {
+        if (current && valid && backgroundCacheAllowed()) {
           const String key = slot ? String("om") + slot : String("last_om");
           const String stampKey = slot ? String("om_at") + slot : String("last_om_at");
            const String cached = String(county) + "," + result.low + "," +
@@ -3044,10 +3195,12 @@ static void networkTask(void *) {
           prefs.putString(stampKey.c_str(), result.stamp);
           xSemaphoreGive(configMutex);
         }
+        if(weatherPrioritySlot.load()>=0){retryRequests|=kFetchWeather;break;}
       }
     }
 
     if (requests & kFetchMarkets) {
+      activeHttpRequest=kFetchMarkets;
       String codes[kMaxStocks];
       uint8_t count;
       while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
@@ -3079,7 +3232,7 @@ static void networkTask(void *) {
           ++stockUiRevision;
         }
         lvgl_port_unlock();
-        if (current && valid) {
+        if (current && valid && backgroundCacheAllowed()) {
           xSemaphoreTake(configMutex, portMAX_DELAY);
           if (i == 0) {
             prefs.putString("last_st", value);
@@ -3111,7 +3264,7 @@ static void networkTask(void *) {
           remote.indexStamp = result.indexStamp;
         }
         lvgl_port_unlock();
-        if (indexValid) {
+        if (indexValid && backgroundCacheAllowed()) {
           xSemaphoreTake(configMutex, portMAX_DELAY);
           prefs.putString("last_idx", result.index);
           prefs.putString("last_idx_at", result.indexStamp);
@@ -3121,12 +3274,12 @@ static void networkTask(void *) {
       if (WiFi.status() != WL_CONNECTED) continue;
       const bool nightValid = fetchNight(result);
       while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
-      if (nightValid || remote.nightStamp.isEmpty()) {
+      if (!backgroundHttpDeferred && (nightValid || remote.nightStamp.isEmpty())) {
         remote.night = result.night;
         remote.nightStamp = result.nightStamp;
       }
       lvgl_port_unlock();
-      if (nightValid) {
+      if (nightValid && backgroundCacheAllowed()) {
         xSemaphoreTake(configMutex, portMAX_DELAY);
         prefs.putString("last_night", result.night);
         prefs.putString("last_night_at", result.nightStamp);
@@ -3139,6 +3292,11 @@ static void networkTask(void *) {
                   (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                   (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+    retryRequests|=backgroundRetryRequests;
+    if(retryRequests && WiFi.status()==WL_CONNECTED){
+      vTaskDelay(pdMS_TO_TICKS(500));
+      xTaskNotify(networkTaskHandle,retryRequests,eSetBits);
+    }
   }
 }
 
@@ -3183,7 +3341,7 @@ static void refreshUi() {
   homeSetText(clockPeriodLabel, period);
   alignHomeClockPeriod(clockText,period);
   homeSetText(dateLabel, dateText);
-  setHomeDogTime(timeReady ? t.tm_hour * 60 + t.tm_min : -1);
+  setHomeDogTime(timeReady ? &t : nullptr);
   char status[28];
   if (batteryPresent()) {
     const int centivolts = (batteryMv + 5) / 10;
@@ -3203,7 +3361,7 @@ static void refreshUi() {
     wifiColorConnected = wifiConnected;
   }
   const uint32_t now = millis();
-  refreshHomeRows(now);
+  if(lv_screen_active()==homeScreen)refreshHomeRows(now);
   if (networkLabel) {
     String status = wifiStatusError == 1 ? "密碼錯誤，請重輸" :
       wifiStatusError == 2 ? (wifiRetryAtMs ? "連線失敗，重試中" : "連線失敗，請重試") :
@@ -3240,6 +3398,7 @@ void setup() {
   settingsButton.armed = !settingsButton.stablePressed;
   Serial.printf("[BOOT] wake=%d power_pin=%d\n", (int)wakeCause, digitalRead(kPowerButtonPin));
   setenv("TZ", kTz, 1); tzset();
+  desk_log_begin();
   loadConfig();
   configMutex = xSemaphoreCreateMutex();
   audioMutex = xSemaphoreCreateMutex();
@@ -3253,6 +3412,7 @@ void setup() {
   Serial.printf("[TOUCH] I2C %s\n", i2c_touch_probe() ? "ready" : "not found");
   initAudio();
   setSystemFromRtc();
+  desk_log_event(DESK_LOG_INFO,"TIME_RTC",0,0,"RTC wall-clock anchor; compare boot uptime if initial time is null");
   analogReadResolution(12);
   analogSetPinAttenuation(kBatteryPin, ADC_11db);
   sampleBattery();
@@ -3267,6 +3427,7 @@ void setup() {
   lvgl_port_init();
   if (lvgl_port_lock(2000)) {
     deskFontInitSd();
+    if(!deskFontSdMounted())desk_log_event(DESK_LOG_ERROR,"SD_MOUNT_FAILED",0,0,"built-in fonts remain available");
     buildHome(); buildSettings(); buildStockScreen();
     lv_screen_load(homeScreen);
     lv_mem_monitor_t lvMem;
@@ -3291,6 +3452,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(false);
   WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+    desk_log_event(DESK_LOG_WARN,"WIFI_DISCONNECT_REASON",info.wifi_sta_disconnected.reason,0,"");
     wifiDisconnectReason.store(info.wifi_sta_disconnected.reason);
     if (radioSessionActive.load()) {
       radioLinkLost.store(true);
@@ -3331,8 +3493,45 @@ void loop() {
   toggleSettingsFromButton();
   otaConfirmFirstBoot(now);
   audioTick();
+  // USB diagnostic commands only concern the logger; no network/UI work here.
+  static char logCommand[96];static uint8_t logCommandSize=0;
+  for(unsigned n=0;n<64 && Serial.available();++n){
+    const int c=Serial.read();
+    if(c=='\n'){
+      logCommand[logCommandSize]=0;
+      int testStation=0;
+      int testCounty=-1;
+      int testPet=-1;
+      if(sscanf(logCommand,"LOG TEST PET %d",&testPet)==1&&testPet>=0&&testPet<(int)(sizeof(kPetActions)/sizeof(kPetActions[0]))){
+        setHomePetTest(testPet);
+      }else if(sscanf(logCommand,"LOG TEST PLAY %d",&testStation)==1 && testStation>=1 && testStation<=kRadioStations){
+        desk_log_event(DESK_LOG_INFO,"SELF_TEST_RADIO",testStation,0,"explicit USB test; settings unchanged");
+        radioStation.store(testStation);radioCommand.store(testStation);
+      }else if(!strcmp(logCommand,"LOG TEST STOP")){
+        desk_log_event(DESK_LOG_INFO,"SELF_TEST_RADIO",0,0,"explicit USB stop for cache persistence test");
+        radioCommand.store(0);
+      }else if(sscanf(logCommand,"LOG TEST WEATHER %d",&testCounty)==1 && testCounty>=0 && testCounty<kCountyCount){
+        desk_log_event(DESK_LOG_INFO,"SELF_TEST_WEATHER",testCounty,0,"probe only; settings unchanged");
+        probeWeatherCounty.store(testCounty);
+        if(networkTaskHandle)xTaskNotify(networkTaskHandle,kProbeWeather,eSetBits);
+      }else if(!strcmp(logCommand,"LOG TEST WEATHER")){
+        desk_log_event(DESK_LOG_INFO,"SELF_TEST_WEATHER",0,0,"refresh existing counties; settings unchanged");
+        if(lvgl_port_lock(10)){weatherPrioritySlot.store(weatherSlot);lvgl_port_unlock();}
+        if(networkTaskHandle)xTaskNotify(networkTaskHandle,kFetchWeather,eSetBits);
+      }else if(!strcmp(logCommand,"LOG TEST UI")){
+        // Run one step per loop interval; never hold the LVGL lock while waiting.
+        desk_log_event(DESK_LOG_INFO,"SELF_TEST_UI",10,0,"explicit USB home weather/radio switches");
+        pendingUiTestSteps.store(10);
+      }else desk_log_serial_command(logCommand);
+      logCommandSize=0;
+    }
+    else if(c!='\r'){if(logCommandSize+1<sizeof(logCommand))logCommand[logCommandSize++]=(char)c;else logCommandSize=0;}
+  }
   collectWifiScan();
   maintainWifi(now);
+  if(backgroundAfterRadio.load() && !radioNeedsNetwork()){
+    backgroundAfterRadio.store(false);networkRefresh.store(true);
+  }
   if (ntpSynced.exchange(false)) {
     tm t; if (getLocalTime(&t, 100)) rtcWrite(t);
     networkRefresh = true;
@@ -3360,6 +3559,20 @@ void loop() {
     if (requests && networkTaskHandle) xTaskNotify(networkTaskHandle, requests, eSetBits);
   }
   static uint32_t lastUi = 0;
+  static uint32_t lastUiTestStep=0;
+  if(pendingUiTestSteps.load()>0 && now-lastUiTestStep>=500 && lvgl_port_lock(10)){
+    const int step=pendingUiTestSteps.fetch_sub(1);
+    if(lv_screen_active()!=homeScreen)lv_screen_load(homeScreen);
+    showHomeCarousel(step%2 ? 0 : 2);
+    lvgl_port_unlock();lastUiTestStep=now;
+    if(step==1)desk_log_event(DESK_LOG_INFO,"SELF_TEST_UI_DONE",10,0,"");
+  }
+  if(homeWeatherDirty.exchange(false)){
+    if(lvgl_port_lock(10)){
+      if(lv_screen_active()==homeScreen && homeCarouselPage==0)refreshHomeRows(now);
+      lvgl_port_unlock();
+    } else homeWeatherDirty.store(true);
+  }
   if ((uint32_t)(now - lastUi) >= 1000) { refreshUi(); lastUi = now; }
   delay(30);
 }

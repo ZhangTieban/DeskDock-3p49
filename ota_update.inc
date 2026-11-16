@@ -20,6 +20,7 @@ static std::atomic<bool> otaPendingVerify{false};
 static uint32_t otaBootReadyMs = 0;
 
 static void otaSetError(OtaError code, const char *detail) {
+  desk_log_event(DESK_LOG_ERROR,"OTA_ERROR",(int)code,0,detail);
   otaError.store(code);
   otaStage.store(OtaStage::Error);
   Serial.printf("[OTA] %s\n", detail);
@@ -326,6 +327,8 @@ static bool otaInstallFromSd() {
   }
   Serial.printf("[OTA] boot slot=%s version=%s\n", next->label, otaManifest.version);
   otaStage.store(OtaStage::Rebooting);
+    desk_log_event(DESK_LOG_INFO,"OTA_REBOOT",0,0,otaManifest.version);
+    desk_log_flush(1000);
   vTaskDelay(pdMS_TO_TICKS(1500));
   esp_restart();
   return true;
