@@ -81,11 +81,13 @@ static lv_font_t makeFont(const DeskFontBlob *blob, int height, int base,
 }
 
 #include "desk_font_data.inc"
+#include "desk_status_font_data.inc"
 
 lv_font_t desk_font_16 = makeFont(&desk_blob_16, 23, 5, &lv_font_montserrat_14);
 lv_font_t desk_font_16_bold = makeFont(&desk_blob_16_bold, 23, 5, &desk_font_16);
 lv_font_t desk_font_14_bold = makeFont(&desk_blob_14_bold, 20, 4, &desk_font_16_bold);
 lv_font_t desk_font_10_bold = makeFont(&desk_blob_10_bold, 15, 3, &desk_font_16);
+lv_font_t desk_font_12_bold = makeFont(&desk_blob_12_bold, 18, 4, &desk_font_16);
 lv_font_t desk_font_18 = makeFont(&desk_blob_18, 23, 5, &desk_font_16);
 lv_font_t desk_font_20 = makeFont(&desk_blob_20, 29, 6, &desk_font_16);
 lv_font_t desk_font_20_bold = makeFont(&desk_blob_20_bold, 26, 5, &desk_font_16_bold);

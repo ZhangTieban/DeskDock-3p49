@@ -40,6 +40,7 @@ jobs:
           python3 -m unittest discover -s DeskDock_3p49/tools -p 'test_dns_patch.py'
           python3 -m unittest discover -s DeskDock_3p49/tools -p 'test_audio_stability_patch.py'
           python3 DeskDock_3p49/tools/test_pet_data.py
+          python3 DeskDock_3p49/tools/test_home_status.py
           g++ -std=c++17 DeskDock_3p49/tools/test_mp3_timing.cpp -o /tmp/deskdock-mp3-timing-tests
           /tmp/deskdock-mp3-timing-tests
           g++ -std=c++17 DeskDock_3p49/tools/test_pet_schedule.cpp -o /tmp/deskdock-pet-tests

@@ -63,6 +63,26 @@ static const lv_image_dsc_t kHomeBirthdayCake = {
   .data_size = sizeof(kHomeBirthdayCakePixels), .data = kHomeBirthdayCakePixels
 };
 
+static lv_obj_t *createHomeUsbIcon(lv_obj_t *parent) {
+  auto *buffer=lv_draw_buf_create(12,12,LV_COLOR_FORMAT_RGB565,LV_STRIDE_AUTO);
+  if(!buffer){desk_log_event(DESK_LOG_ERROR,"USB_ICON_ALLOC_FAILED",0,0,"");return nullptr;}
+  // USB trident: arrow, round branch, square branch; one-bit, 12 x 12.
+  static const char pixels[]=
+    ".....1......" "....111....." ".....1......" "..1..1..11.."
+    ".111.1..11.." "..1..1..1..." "..11.1.11..." "...11111...."
+    ".....1......" "....111....." "...11111...." "....111.....";
+  static_assert(sizeof(pixels)==12*12+1,"USB bitmap dimensions");
+  for(int y=0;y<12;y++){
+    auto *row=reinterpret_cast<uint16_t *>(buffer->data+y*buffer->header.stride);
+    for(int x=0;x<12;x++){
+      const uint32_t rgb=pixels[y*12+x]=='1'?0xDCE9E1:kHomeBackground;
+      row[x]=((rgb>>8)&0xF800)|((rgb>>5)&0x07E0)|((rgb>>3)&0x001F);
+    }
+  }
+  auto *icon=lv_canvas_create(parent);lv_canvas_set_draw_buf(icon,buffer);
+  lv_obj_add_flag(icon,LV_OBJ_FLAG_HIDDEN);return icon;
+}
+
 static void homeSetText(lv_obj_t *item, const String &text) {
   if (item && strcmp(lv_label_get_text(item), text.c_str()))
     lv_label_set_text(item, text.c_str());
@@ -424,14 +444,20 @@ static void buildHome() {
   lv_obj_set_style_text_font(clockPeriodLabel, &desk_font_14_bold, 0);
   lv_obj_set_style_text_align(clockPeriodLabel, LV_TEXT_ALIGN_RIGHT, 0);
 
-  wifiLabel = label(homeScreen, "Wi-Fi", 12, 9, 210);
-  lv_obj_set_style_text_font(wifiLabel, &desk_font_10_bold, 0);
+  wifiLabel = label(homeScreen, "Wi-Fi", 12, 7, 36);
+  lv_obj_set_style_text_font(wifiLabel, &desk_font_12_bold, 0);
+  lv_obj_set_width(wifiLabel,LV_SIZE_CONTENT);
+  batteryPercentLabel=label(homeScreen,"--%",48,7,36);
+  lv_obj_set_style_text_font(batteryPercentLabel,&desk_font_12_bold,0);
+  lv_obj_set_width(batteryPercentLabel,LV_SIZE_CONTENT);
+  homeUsbIcon=createHomeUsbIcon(homeScreen);
   occasionLabel = label(homeScreen, "", 82, 7, 145);
-  lv_obj_set_style_text_font(occasionLabel, &desk_font_14_bold, 0);
-  lv_obj_set_style_text_align(occasionLabel, LV_TEXT_ALIGN_RIGHT, 0);
+  lv_obj_set_style_text_font(occasionLabel, &desk_font_12_bold, 0);
+  lv_obj_set_style_text_align(occasionLabel, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_color(occasionLabel, lv_color_hex(0xF2C64B), 0);
   occasionIcon = lv_image_create(homeScreen);
-  lv_obj_set_pos(occasionIcon, 231, 8);
+  lv_image_set_pivot(occasionIcon,0,0);lv_image_set_scale(occasionIcon,192); // 16 -> 12 pixels
+  lv_obj_set_pos(occasionIcon,231,10);
   lv_obj_add_flag(occasionIcon, LV_OBJ_FLAG_HIDDEN);
 
   homeStockPane = lv_obj_create(homeScreen);
@@ -566,6 +592,7 @@ static void buildHome() {
   lv_obj_set_style_text_font(homeMp3.count, &desk_font_14_bold, 0);
   lv_obj_set_style_text_align(homeMp3.count, LV_TEXT_ALIGN_RIGHT, 0);
   homeMp3.time = label(homeMp3Pane,"0:00  /  --:--",0,81,kHomeContentW);
+  lv_obj_set_style_text_align(homeMp3.time,LV_TEXT_ALIGN_CENTER,0);
   homeMp3.progress = lv_bar_create(homeMp3Pane);
   lv_obj_set_pos(homeMp3.progress, 0, 104);
   lv_obj_set_size(homeMp3.progress, kHomeContentW, 2);

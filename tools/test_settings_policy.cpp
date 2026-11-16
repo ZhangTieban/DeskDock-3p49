@@ -11,6 +11,9 @@ static_assert(deskBatteryMode(0,2)==0&&deskBatteryMode(1,2)==1);
 static_assert(deskBatteryVisible(deskBatteryMode(-1,2),4149),"measured 4.149V must appear despite the old hidden default");
 static_assert(!deskBatteryVisible(0,0)&&!deskBatteryVisible(0,2899)&&deskBatteryVisible(0,2900));
 static_assert(deskBatteryVisible(1,0)&&!deskBatteryVisible(2,4149));
+static_assert(deskBatteryPercent(3000)==0&&deskBatteryPercent(3300)==0&&deskBatteryPercent(4200)==100&&deskBatteryPercent(5000)==100);
+static_assert(deskBatteryPercent(3381)==9&&deskBatteryPercent(3390)==10&&deskBatteryPercent(3750)==50&&deskBatteryPercent(4120)==91);
+static_assert(deskBatteryLow(true,9)&&!deskBatteryLow(true,10)&&!deskBatteryLow(false,0));
 constexpr bool dnsLockTest(bool alreadyHeld) {
   bool held=alreadyHeld, callbackSafe=false, nestedSafe=false;
   int locks=0, unlocks=0;

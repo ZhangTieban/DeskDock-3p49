@@ -3,6 +3,8 @@
 OTA 安裝此版後，插著 FAT32 SD 卡開機，程式會自行建立 `/logs`，不需先建資料夾或開啟選項。
 
 電池顯示設定記錄 `BATTERY_MODE`（a=0依電壓、1已安裝、2手動隱藏；b=量測毫伏），開機及切換時記錄。舊 `batt_mode2=2` 的隱藏預設被改為依電壓判斷時，記錄 `BATTERY_MODE_MIGRATED`（a=舊模式、b=新模式）。新選擇使用 `batt_mode3` 保存，不再把舊隱藏預設視為手動選擇。
+
+0.2.15新增 `POWER_STATUS`：a=電量百分比估算值（-1代表隱藏／未知），b=USB主機SOF連線（0/1）。狀態或電量變化時記錄；b不是VBUS電壓、充電中或充電器插入偵測。首頁改顯示百分比，既有 `battery_mv` 仍保留原始量測以供偵錯。移除MP3畫面的「約」不會移除LOG的 `mp3_duration_estimated` 旗標。
 開機序列埠會顯示 `[EVENTLOG] ready /logs/events-....jsonl`。原有 fonts、music、update 與設定保留。
 
 每次開機建立獨立 JSONL 檔，一行一筆事件；單檔達 8 MiB 另開新檔，**不自動刪除或覆寫舊紀錄**。

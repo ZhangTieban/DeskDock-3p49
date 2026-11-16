@@ -28,6 +28,7 @@ extern "C" {
 #include <driver/rtc_io.h>
 #include <driver/gpio.h>
 #include <driver/ledc.h>
+#include <driver/usb_serial_jtag.h>
 #include <atomic>
 #include <algorithm>
 #include <cstring>
@@ -313,6 +314,7 @@ static Mp3Panel settingsMp3, homeMp3;
 static lv_obj_t *mp3RepeatButton;
 static lv_obj_t *clockLabel, *clockPeriodLabel, *dateLabel, *wifiLabel;
 static lv_obj_t *occasionLabel, *occasionIcon;
+static lv_obj_t *batteryPercentLabel, *homeUsbIcon;
 static lv_obj_t *footerPageA, *footerPageB;
 static uint8_t footerPage = 0;
 static uint32_t lastFooterFlip = 0;
@@ -712,7 +714,7 @@ static void sampleBattery() {
   for (int i = 0; i < 8; ++i) total += analogReadMilliVolts(kBatteryPin);
   batteryMv = (int)(total / 8) * 3;
   desk_log_battery(batteryMv);
-  batteryPct = constrain((batteryMv - 3300) * 100 / 900, 0, 100);
+  batteryPct = deskBatteryPercent(batteryMv);
   lastBatteryMs = millis();
 }
 
@@ -2108,7 +2110,7 @@ static void changeHourMode(lv_event_t *) {
   lastInputMs = millis();
 }
 static const char *batteryModeText() {
-  return cfg.batteryMode==1?"電池已裝":cfg.batteryMode==2?"隱藏電壓":"電池自動";
+  return cfg.batteryMode==1?"電池已裝":cfg.batteryMode==2?"隱藏電量":"電池自動";
 }
 static void changeBatteryMode(lv_event_t *) {
   cfg.batteryMode=(cfg.batteryMode+1)%3;
@@ -2199,8 +2201,8 @@ static void updateMp3Screen() {
   const uint32_t played=mp3ElapsedMs.load()/1000,totalMs=mp3DurationMs.load();
   const uint32_t remaining=totalMs>mp3ElapsedMs.load()?(totalMs-mp3ElapsedMs.load()+999)/1000:0;
   if(state>=2&&state<=5) {
-    if(totalMs)snprintf(timeStatus,sizeof(timeStatus),"%lu:%02lu  /  -%s%lu:%02lu",
-      (unsigned long)(played/60),(unsigned long)(played%60),mp3DurationEstimated.load()?"約":"",
+    if(totalMs)snprintf(timeStatus,sizeof(timeStatus),"%lu:%02lu  /  %lu:%02lu",
+      (unsigned long)(played/60),(unsigned long)(played%60),
       (unsigned long)(remaining/60),(unsigned long)(remaining%60));
     else snprintf(timeStatus,sizeof(timeStatus),"%lu:%02lu  /  --:--",(unsigned long)(played/60),(unsigned long)(played%60));
     setText(panel->time,timeStatus);
@@ -2600,6 +2602,7 @@ static void buildSettings() {
   settingsMp3.status = label(mp3Page, "尚未掃描", 20, 65, 116);
   settingsMp3.count = label(mp3Page, "0 首", 20, 92, 116);
   settingsMp3.time = label(mp3Page,"0:00  /  --:--",143,65,kMp3ProgressWidth);
+  lv_obj_set_style_text_align(settingsMp3.time,LV_TEXT_ALIGN_CENTER,0);
   settingsMp3.progress = lv_bar_create(mp3Page);
   lv_obj_set_pos(settingsMp3.progress, 143, 100);
   lv_obj_set_size(settingsMp3.progress, kMp3ProgressWidth, 8);
@@ -3435,6 +3438,13 @@ static void refreshHomeOccasion(const tm *date) {
     }
   }
   homeSetText(occasionLabel, text);
+  if(text[0]){
+    lv_point_t size;
+    lv_text_get_size(&size,text,&desk_font_12_bold,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+    const int x=(307-size.x)/2;
+    lv_obj_set_width(occasionLabel,size.x);lv_obj_set_pos(occasionLabel,x,7);
+    lv_obj_set_pos(occasionIcon,x+size.x+4,10);
+  }
   if (icon && lv_image_get_src(occasionIcon) != icon) lv_image_set_src(occasionIcon, icon);
   homeVisible(occasionIcon, icon != nullptr);
 }
@@ -3463,18 +3473,34 @@ static void refreshUi() {
   alignHomeClockPeriod(clockText,period);
   homeSetText(dateLabel, dateText);
   setHomeDogTime(timeReady ? &t : nullptr);
-  char status[28];
-  if (batteryPresent()) {
-    const int centivolts = (batteryMv + 5) / 10;
-    snprintf(status, sizeof(status), "Wi-Fi · %d.%02dV", centivolts / 100,
-             centivolts % 100);
-  } else {
-    snprintf(status, sizeof(status), "Wi-Fi");
+  const bool hasBattery=batteryPresent();
+  char percentage[8];
+  if(hasBattery)snprintf(percentage,sizeof(percentage),"%d%%",batteryPct);
+  else strcpy(percentage,"--%");
+  homeSetText(batteryPercentLabel,percentage);
+  lv_obj_update_layout(wifiLabel);lv_obj_update_layout(batteryPercentLabel);
+  lv_obj_align_to(batteryPercentLabel,wifiLabel,LV_ALIGN_OUT_RIGHT_MID,2,0);
+  const bool usbConnected=usb_serial_jtag_is_connected(); // Host SOF, not VBUS/charging detection.
+  if(homeUsbIcon){
+    lv_obj_align_to(homeUsbIcon,batteryPercentLabel,LV_ALIGN_OUT_RIGHT_MID,2,0);
+    homeVisible(homeUsbIcon,usbConnected);
   }
-  homeSetText(wifiLabel, status);
   refreshHomeOccasion(timeReady ? &t : nullptr);
   static bool wifiColorReady = false, wifiColorConnected = false;
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  const uint32_t baseColor=wifiConnected?0xDCE9E1:0x66716C;
+  const uint32_t percentageColor=deskBatteryLow(hasBattery,batteryPct)?0xF07878:baseColor;
+  static uint32_t lastPercentageColor=0;
+  if(lastPercentageColor!=percentageColor){
+    lv_obj_set_style_text_color(batteryPercentLabel,lv_color_hex(percentageColor),0);lastPercentageColor=percentageColor;
+  }
+  static int lastPowerState=-1;
+  const int powerState=(hasBattery?batteryPct+1:0)+(usbConnected?256:0);
+  if(powerState!=lastPowerState){
+    desk_log_event(DESK_LOG_INFO,"POWER_STATUS",hasBattery?batteryPct:-1,usbConnected,
+      "a=estimated battery percent (-1 hidden/unknown); b=USB host detected, not charger presence");
+    lastPowerState=powerState;
+  }
   if (!wifiColorReady || wifiConnected != wifiColorConnected) {
     lv_obj_set_style_text_color(wifiLabel,
                                 lv_color_hex(wifiConnected ? 0xDCE9E1 : 0x66716C), 0);

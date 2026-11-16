@@ -4,6 +4,7 @@ extern lv_font_t desk_font_16;
 extern lv_font_t desk_font_16_bold;
 extern lv_font_t desk_font_14_bold;
 extern lv_font_t desk_font_10_bold;
+extern lv_font_t desk_font_12_bold;
 extern lv_font_t desk_font_18;
 extern lv_font_t desk_font_20;
 extern lv_font_t desk_font_20_bold;

@@ -11,3 +11,9 @@ constexpr int deskBatteryMode(int savedV3,int legacyV2) {
 constexpr bool deskBatteryVisible(int mode,int millivolts) {
   return mode==1||(mode==0&&millivolts>=2900);
 }
+constexpr int deskBatteryPercent(int millivolts) {
+  return millivolts<=3300?0:millivolts>=4200?100:(millivolts-3300)*100/900;
+}
+constexpr bool deskBatteryLow(bool present,int percent) {
+  return present&&percent<10;
+}
