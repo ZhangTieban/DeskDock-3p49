@@ -30,9 +30,12 @@ struct Event {
   uint32_t seq, heap, largest, minimum, psram, buffer;
   int32_t a,b,rssi;
   uint8_t level,station,state;
-  uint8_t mp3State,mp3Track,mp3Count;
-  uint16_t mp3Progress;
-  uint32_t mp3Buffer;
+  uint8_t mp3State;
+  uint16_t mp3Track,mp3Count,mp3Progress;
+  uint32_t mp3Buffer,mp3Elapsed,mp3Duration,rxBps,rxTotal,sampleMs;
+  int16_t cpu0,cpu1;
+  uint16_t battery;
+  bool mp3Estimated;
   char code[28],detail[112];
 };
 QueueHandle_t queue=nullptr;
@@ -43,6 +46,9 @@ std::atomic<bool> audioLow{false};
 std::atomic<int> station{0},audioState{0},rssi{0};
 std::atomic<int> mp3State{0},mp3Track{0},mp3Count{0},mp3Progress{0};
 std::atomic<uint32_t> mp3Buffer{0};
+std::atomic<uint32_t> mp3Elapsed{0},mp3Duration{0},rxBytes{0},rxBps{0},sampleMs{0};
+std::atomic<bool> mp3Estimated{false};
+std::atomic<int> battery{0},cpu0{-1},cpu1{-1};
 std::atomic<uint32_t> committed{0},storageFailures{0};
 std::atomic<int> storageErrno{0};
 std::atomic<bool> writing{false};
@@ -67,6 +73,9 @@ Event makeEvent(int level,const char *code,int32_t a,int32_t b,const char *detai
   e.station=station.load();e.state=audioState.load();e.buffer=buffered.load();e.rssi=rssi.load();
   e.mp3State=mp3State.load();e.mp3Track=mp3Track.load();e.mp3Count=mp3Count.load();
   e.mp3Progress=mp3Progress.load();e.mp3Buffer=mp3Buffer.load();
+  e.mp3Elapsed=mp3Elapsed.load();e.mp3Duration=mp3Duration.load();e.mp3Estimated=mp3Estimated.load();
+  e.cpu0=cpu0.load();e.cpu1=cpu1.load();e.battery=battery.load();
+  e.rxBps=rxBps.load();e.rxTotal=rxBytes.load();e.sampleMs=sampleMs.load();
   snprintf(e.code,sizeof(e.code),"%s",code ? code : "UNKNOWN");
   snprintf(e.detail,sizeof(e.detail),"%s",detail ? detail : "");
   deskLogTrimUtf8(e.detail);
@@ -119,7 +128,10 @@ bool openLog() {
   return fd>=0;
 }
 bool persist(const Event &e) {
-  char escaped[680],code[64],stamp[40]="";
+  // Only the logger worker serializes records. Keep scratch buffers off its
+  // stack as telemetry fields grow; producers still queue fixed-size Events.
+  static char escaped[680],code[64],stamp[40],remaining[16],duration[16],line[1664];
+  stamp[0]=0;
   deskLogEscape(escaped,sizeof(escaped),e.detail);deskLogEscape(code,sizeof(code),e.code);
   const bool valid=e.epoch>=1704067200000LL;
   if (valid) {
@@ -127,18 +139,26 @@ bool persist(const Event &e) {
     strftime(stamp,sizeof(stamp),"%Y-%m-%dT%H:%M:%S",&t);
     const size_t n=strlen(stamp);snprintf(stamp+n,sizeof(stamp)-n,".%03d+08:00",(int)(e.epoch%1000));
   }
-  char line[1280];
+  strcpy(remaining,"null");strcpy(duration,"null");
+  if(e.mp3Duration){
+    snprintf(duration,sizeof(duration),"%lu",(unsigned long)e.mp3Duration);
+    snprintf(remaining,sizeof(remaining),"%lu",(unsigned long)(e.mp3Duration>e.mp3Elapsed?e.mp3Duration-e.mp3Elapsed:0));
+  }
   const int count=snprintf(line,sizeof(line),
     "{\"schema\":1,\"firmware\":\"" DESKDOCK_VERSION "\",\"boot\":\"%08lx\",\"seq\":%lu,\"time\":%s%s%s,\"uptime_ms\":%llu,"
     "\"level\":\"%s\",\"event\":\"%s\",\"a\":%ld,\"b\":%ld,\"detail\":\"%s\","
     "\"heap\":%lu,\"largest\":%lu,\"min_heap\":%lu,\"psram\":%lu,\"rssi\":%ld,"
     "\"station\":%u,\"audio_state\":%u,\"buffer\":%lu,"
-    "\"mp3_state\":%u,\"mp3_track\":%u,\"mp3_tracks\":%u,\"mp3_buffer\":%lu,\"mp3_progress\":%u}\n",
+    "\"mp3_state\":%u,\"mp3_track\":%u,\"mp3_tracks\":%u,\"mp3_buffer\":%lu,\"mp3_progress\":%u,"
+    "\"mp3_elapsed_ms\":%lu,\"mp3_duration_ms\":%s,\"mp3_remaining_ms\":%s,\"mp3_duration_estimated\":%s,"
+    "\"cpu0_permille\":%d,\"cpu1_permille\":%d,\"battery_mv\":%u,\"net_rx_Bps\":%lu,\"net_rx_bytes\":%lu,\"metrics_window_ms\":%lu}\n",
     (unsigned long)bootId,(unsigned long)e.seq,valid ? "\"" : "",valid ? stamp : "null",valid ? "\"" : "",
     (unsigned long long)e.uptime,e.level==DESK_LOG_ERROR ? "ERROR" : e.level==DESK_LOG_WARN ? "WARN" : "INFO",
     code,(long)e.a,(long)e.b,escaped,(unsigned long)e.heap,(unsigned long)e.largest,
     (unsigned long)e.minimum,(unsigned long)e.psram,(long)e.rssi,e.station,e.state,(unsigned long)e.buffer,
-    e.mp3State,e.mp3Track,e.mp3Count,(unsigned long)e.mp3Buffer,e.mp3Progress);
+    e.mp3State,e.mp3Track,e.mp3Count,(unsigned long)e.mp3Buffer,e.mp3Progress,
+    (unsigned long)e.mp3Elapsed,duration,remaining,e.mp3Estimated?"true":"false",e.cpu0,e.cpu1,e.battery,
+    (unsigned long)e.rxBps,(unsigned long)e.rxTotal,(unsigned long)e.sampleMs);
   if (count<=0 || (size_t)count>=sizeof(line)) return false;
   if (xSemaphoreTake(deskSdMutex(),pdMS_TO_TICKS(50))!=pdTRUE) return false;
   bool okay=true;size_t done=0;
@@ -199,10 +219,23 @@ void preserveCoredump() {
 void worker(void *) {
   uint32_t lastHealth=0,lastSnapshot=0,lastRetry=0,lastNotice=0;
   bool memoryLow=false,signalLow=false,wasConnected=false,dumpChecked=false;
+  uint32_t lastMetricsUs=(uint32_t)esp_timer_get_time(),lastRx=rxBytes.load();
+  uint32_t lastIdle[2]={(uint32_t)ulTaskGetIdleRunTimeCounterForCore(0),(uint32_t)ulTaskGetIdleRunTimeCounterForCore(1)};
   for (;;) {
     const uint32_t now=millis();
     if (now-lastHealth>=1000) {
       lastHealth=now;const bool connected=WiFi.status()==WL_CONNECTED;
+      const uint32_t metricsUs=(uint32_t)esp_timer_get_time(),deltaUs=metricsUs-lastMetricsUs,rx=rxBytes.load();
+      if(deltaUs){
+        int load[2];
+        for(unsigned core=0;core<2;core++){
+          const uint32_t idle=(uint32_t)ulTaskGetIdleRunTimeCounterForCore(core),delta=idle-lastIdle[core];
+          load[core]=1000-std::min<uint64_t>(1000,uint64_t(delta)*1000/deltaUs);lastIdle[core]=idle;
+        }
+        cpu0.store(load[0]);cpu1.store(load[1]);sampleMs.store(deltaUs/1000);
+        rxBps.store(uint64_t(uint32_t(rx-lastRx))*1000000/deltaUs);
+      }
+      lastMetricsUs=metricsUs;lastRx=rx;
       rssi.store(connected ? WiFi.RSSI() : 0);
       if (connected!=wasConnected) {desk_log_event(connected ? DESK_LOG_INFO : DESK_LOG_WARN,
         connected ? "WIFI_CONNECTED" : "WIFI_DISCONNECTED",0,0,"");wasConnected=connected;}
@@ -257,9 +290,15 @@ extern "C" void desk_log_mp3(int state,int track,uint32_t fill,int progress) {
   mp3State.store(state);mp3Track.store(track);mp3Buffer.store(fill);mp3Progress.store(progress);
 }
 extern "C" void desk_log_mp3_count(int count){mp3Count.store(count);}
+extern "C" void desk_log_mp3_time(uint32_t elapsed,uint32_t duration,bool estimated){
+  mp3Elapsed.store(elapsed);mp3Duration.store(duration);mp3Estimated.store(estimated);
+}
+extern "C" void desk_log_battery(int millivolts){battery.store(millivolts);}
+extern "C" void desk_log_net_rx(uint32_t bytes){rxBytes.fetch_add(bytes);}
 extern "C" bool desk_log_begin() {
   if(queue)return true;bootId=esp_random();
-  queue=xQueueCreateWithCaps(128,sizeof(Event),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  // A 256-track catalog can contain 512 UTF-8 path parts plus bookends.
+  queue=xQueueCreateWithCaps(1024,sizeof(Event),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
   if(!queue){Serial.println("[EVENTLOG] queue allocation failed");return false;}
   if(xTaskCreatePinnedToCore(worker,"SD events",8192,nullptr,1,nullptr,0)!=pdPASS){
     vQueueDeleteWithCaps(queue);queue=nullptr;Serial.println("[EVENTLOG] task creation failed");return false;}

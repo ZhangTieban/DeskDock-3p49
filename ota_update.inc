@@ -59,6 +59,7 @@ static esp_err_t otaManifestHttpEvent(esp_http_client_event_t *event) {
   otaCaptureRedirect(event, &response->location);
   if (event->event_id != HTTP_EVENT_ON_DATA ||
       esp_http_client_get_status_code(event->client) != 200) return ESP_OK;
+  desk_log_net_rx(event->data_len);
   if (response->body.length() + event->data_len > 2048) {
     response->overflow = true;
     return ESP_FAIL;
@@ -180,6 +181,7 @@ static esp_err_t otaHttpEvent(esp_http_client_event_t *event) {
   auto *transfer = static_cast<OtaDownload *>(event->user_data);
   otaCaptureRedirect(event, &transfer->location);
   if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
+  desk_log_net_rx(event->data_len);
   if (esp_http_client_get_status_code(event->client) != 200) return ESP_OK;
   const size_t count = (size_t)event->data_len;
   if (!count || transfer->received > transfer->expected ||

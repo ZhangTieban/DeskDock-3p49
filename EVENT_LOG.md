@@ -44,7 +44,7 @@ USB 串口 115200 可輸入 `LOG STATUS` 查看目前檔名、待寫入筆數與
 `LOG TEST WEATHER 20` 與 `LOG TEST WEATHER 21` 分別只探測金門、連江，不更動畫面、城市設定或快取。
 `LOG TEST STOP` 停止串流，供驗證停止後的快取與夜盤更新。
 
-事件先放入 128 筆 PSRAM 佇列，背景工作逐筆寫入並檢查 write/fsync；不在觸控、音訊或 Wi-Fi 回呼裡等待 SD。
+事件先放入 1024 筆 PSRAM 佇列（容納 256 首長檔名清單），背景工作逐筆寫入並檢查 write/fsync；不在觸控、音訊或 Wi-Fi 回呼裡等待 SD。
 正常關機與 OTA 重新啟動前會限時等待寫入完成。SD 故障時不覆寫舊檔，待寫入事件先留在佇列，
 恢復後重試，佇列溢位會計數。卡滿／卡故障／拔卡／突然斷電仍可能使尚未落盤的事件遺失；
 不能用軟體保證故障媒體或瞬間斷電下的零遺失。Panic 當下不冒險操作 SD，改在下次開機匯出 SDK 已留下的 Flash coredump。
@@ -57,7 +57,7 @@ USB 串口 115200 可輸入 `LOG STATUS` 查看目前檔名、待寫入筆數與
 
 ## MP3 清單與播放紀錄（0.2.14）
 
-開機自動掃描一次 `/music` 第一層，之後沿用原本 MP3 畫面的重新掃描。播放器仍最多收錄 32 首、檢查 256 個目錄項目，不遞迴子資料夾；超過 191 bytes 的完整路徑仍略過。LOG 的曲數是這次收錄的可播放清單，不能把達到上限時的數字當成整張 SD 的歌曲總數。
+開機自動掃描一次 `/music` 第一層，之後沿用原本 MP3 畫面的重新掃描。最多收錄 256 首、檢查 4096 個目錄項目，不遞迴子資料夾；超過 191 bytes 的完整路徑仍略過。新舊兩份掃描清單均放 PSRAM，配置失敗保留原清單。LOG 的曲數是這次收錄的可播放清單，不能把達到上限時的數字當成整張 SD 的歌曲總數。
 
 | 事件 | 參數／用途 |
 |---|---|
@@ -76,6 +76,21 @@ USB 串口 115200 可輸入 `LOG STATUS` 查看目前檔名、待寫入筆數與
 
 長中文／日文檔名不直接截斷，使用多筆 PATH 事件保存。將同一清單與同一曲目依 b 排序後串接 detail，即為完整檔名／路徑。一般事件與 SDK 的文字長度限制維持不變。
 
-每筆 JSON 額外包含 `mp3_state`（0停止、1開啟中、2播放、3暫停、4失敗、5結束）、`mp3_track`（1起算，0無曲目）、`mp3_tracks`（清單總數）、`mp3_buffer`（位元組）與 `mp3_progress`（0–1000，依檔案位元組比例，非秒數）。原有 heap、largest、min_heap、psram 欄位繼續保留，CSV 匯出也會帶出新欄位；舊檔缺少的新欄位留白。
+每筆 JSON 額外包含 `mp3_state`（0停止、1開啟中、2播放、3暫停、4失敗、5結束）、`mp3_track`（1起算，0無曲目）、`mp3_tracks`（清單總數）、`mp3_buffer`（位元組）與 `mp3_progress`（0–1000）。本修訂版 progress 改以播放毫秒／曲長計算，早期 0.2.14 的 progress 為位元組比例；以有無 `mp3_elapsed_ms` 區分。原有記憶體欄位繼續保留，CSV 也帶出新欄位；舊檔缺少的新欄位留白。
+
+新增欄位：
+
+| 欄位 | 意義 |
+|---|---|
+| mp3_elapsed_ms | 已成功提交 I2S 的 PCM 音訊毫秒，非開檔後經過時間；不含暫停、等資料或收尾靜音，與實際喇叭間可能差 DMA 佇列延遲 |
+| mp3_duration_ms / mp3_remaining_ms | 曲長／剩餘毫秒；無可靠曲長時為 null，畫面顯示 --:-- |
+| mp3_duration_estimated | true=CBR 依檔案大小／位元率估算（畫面「約」）；false=Xing/Info/VBRI 宣告取樣長度或自然結束後的實際長度；不保證宣告標頭一定正確 |
+| cpu0_permille / cpu1_permille | 0–1000，除以10即各核心百分比；根據 ESP-IDF 啟用的 idle runtime counter 差值，每約1秒取樣；-1=尚無樣本，包含系統工作及中斷負載的近似值 |
+| battery_mv | 沿用板上 ADC 分壓量測的電池毫伏，每15秒更新；0=尚未量測，非獨立校準電表 |
+| net_rx_Bps | 最近取樣窗內的應用下載 bytes/s，含 ICY 音訊（不含 ICY metadata）、HLS HTTP payload、天氣／金融／OTA 回應；不是 Wi-Fi 連線速率或網路最大頻寬，沒有下載可為0 |
+| net_rx_bytes | 開機後已計量下載 bytes 累計，uint32 約4GiB繞回；不含 TCP/TLS/MAC 標頭、DNS、NTP 或上傳 |
+| metrics_window_ms | CPU／流量的實際取樣窗長度；SD 忙碌時可能超過1秒 |
+
+曲長只在選曲開檔時檢查 ID3v2 後最多64KiB，排除 ID3v1。避免為求倒數而掃完整首或全部256首、干擾音訊。無索引 VBR 無法預知剩餘時間；不把位元組比值冒充播放秒數。
 
 USB `LOG MP3 LIST` 會把目前快取清單寫入 SD LOG，不重新掃描或中斷播放。明確測試指令：`LOG TEST MP3 SCAN`、`LOG TEST MP3 PLAY 1`、`LOG TEST MP3 PAUSE`、`LOG TEST MP3 RESUME`、`LOG TEST MP3 STOP`；測試會留下 SELF_TEST_MP3 標記。播放中不接受重新掃描，保留既有保護。

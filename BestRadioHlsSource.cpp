@@ -15,6 +15,7 @@ struct TextSink { char *data; size_t size; size_t limit; bool overflow; };
 
 esp_err_t receiveText(esp_http_client_event_t *event) {
   if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
+  desk_log_net_rx(event->data_len);
   auto *sink = static_cast<TextSink *>(event->user_data);
   if (sink->size + event->data_len >= sink->limit) {
     sink->overflow = true;
@@ -291,6 +292,7 @@ bool BestRadioHlsSource::downloadSegment(const String &segment) {
       const int n = esp_http_client_read(client, reinterpret_cast<char *>(packet) + got,
                                          sizeof(packet) - got);
       if (n <= 0) break;
+      desk_log_net_rx(n);
       got += n;
     }
     if (!got) break;

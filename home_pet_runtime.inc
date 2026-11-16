@@ -18,6 +18,8 @@ static void setHomeDogTime(const tm *value) {
     homePetPlanValid=buildPetDaySchedule(homePetDate,homePetPlan);homePetDateKey=key;
     desk_log_event(homePetPlanValid?DESK_LOG_INFO:DESK_LOG_ERROR,
       homePetPlanValid?"PET_PLAN_READY":"PET_PLAN_FAILED",key,homePetPlan.count,"daily schedule; no NVS writes");
+    const int visit=petVisitStart(homePetDate);
+    if(homePetPlanValid&&visit>=0)desk_log_event(DESK_LOG_INFO,"PET_VISIT_PLANNED",visit,visit+120,"local minutes since midnight; weekly two-hour visit");
     Serial.printf("[PET] date=%lu periods=%u valid=%d stack=%u\n",(unsigned long)key,
       homePetPlan.count,homePetPlanValid,(unsigned)uxTaskGetStackHighWaterMark(nullptr));
   }
@@ -102,6 +104,7 @@ static void animateHomeDog(lv_timer_t *timer) {
   PetAction action=period?period->action:scheduledPetAction(homePetSecond<0?-1:homePetSecond/60,PetAction::Lie);
   uint32_t elapsed=period?homePetSecond-period->start:0;
   if(action==PetAction::BathPrepare)action=petBathPhase(elapsed);
+  if(period&&period->kind==PetPeriodKind::Visit)action=petVisitPhase(elapsed);
   const int test=homePetTestAction.load();
   const bool testing=test>=0&&(int32_t)(homePetTestUntil.load()-millis())>0;
   if(testing)action=(PetAction)test;

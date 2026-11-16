@@ -167,7 +167,7 @@ static SemaphoreHandle_t networkHttpMutex;
 static constexpr int kMp3PlayCommand = 100;
 static constexpr int kMp3PauseCommand = -3;
 static constexpr int kMp3ResumeCommand = -4;
-static constexpr int kMp3MaxTracks = 32;
+static constexpr int kMp3MaxTracks = 256;
 static constexpr uint32_t kMp3UiPeriodMs = 100;
 static constexpr int kMp3ProgressWidth = 237;
 static constexpr size_t kMp3PathSize = 192;
@@ -176,11 +176,14 @@ static std::atomic<int> radioCommand{-1}; // -1 none, -2 failed, 0 stop, 1..9 st
 static std::atomic<int> radioState{0}; // 0 stopped, 1 connecting, 2 playing, 3 failed
 static std::atomic<int> radioStation{0};
 static std::atomic<int> mp3State{0}; // 0 stopped, 1 opening, 2 playing, 3 paused, 4 failed, 5 ended
-static std::atomic<int> mp3Progress{0}; // 0..1000, based on file bytes
+static std::atomic<int> mp3Progress{0}; // 0..1000, based on PCM time / duration
+static std::atomic<uint32_t> mp3ElapsedMs{0},mp3DurationMs{0};
+static std::atomic<bool> mp3DurationEstimated{false};
 static std::atomic<Mp3Repeat> mp3Repeat{Mp3Repeat::Off};
 static SemaphoreHandle_t mp3RequestMutex;
 static int mp3RequestedTrack = 0;
-static String mp3Tracks[kMp3MaxTracks];
+struct Mp3Track { char path[kMp3PathSize]; const char *c_str()const{return path;} };
+static Mp3Track *mp3Tracks=nullptr; // Catalog paths stay in PSRAM, including during rescans.
 static int mp3TrackCount = 0;
 static std::atomic<int> mp3SelectedTrack{0};
 static const char *mp3StorageStatus = "尚未掃描";
@@ -304,7 +307,7 @@ static constexpr uint8_t kMp3SettingsPage = 5;
 static lv_obj_t *settingsPages[kSettingsPages], *settingsNavButtons[kSettingsNavCount];
 static lv_obj_t *settingsNavIndicators[kSettingsNavCount];
 struct Mp3Panel {
-  lv_obj_t *title, *status, *count, *play, *progress;
+  lv_obj_t *title, *status, *count, *play, *progress, *time;
 };
 static Mp3Panel settingsMp3, homeMp3;
 static lv_obj_t *mp3RepeatButton;
@@ -708,6 +711,7 @@ static void sampleBattery() {
   uint32_t total = 0;
   for (int i = 0; i < 8; ++i) total += analogReadMilliVolts(kBatteryPin);
   batteryMv = (int)(total / 8) * 3;
+  desk_log_battery(batteryMv);
   batteryPct = constrain((batteryMv - 3300) * 100 / 900, 0, 100);
   lastBatteryMs = millis();
 }
@@ -911,6 +915,12 @@ static bool setCodecRate(int hz) {
   return ok;
 }
 
+class MeteredIcySource : public AudioFileSourceICYStream {
+ public:
+  uint32_t read(void *p,uint32_t n)override {const auto got=AudioFileSourceICYStream::read(p,n);desk_log_net_rx(got);return got;}
+  uint32_t readNonBlock(void *p,uint32_t n)override {const auto got=AudioFileSourceICYStream::readNonBlock(p,n);desk_log_net_rx(got);return got;}
+};
+
 class RadioI2SOutput : public AudioOutputI2S {
  public:
   bool ConsumeSample(int16_t sample[2]) override {
@@ -918,6 +928,7 @@ class RadioI2SOutput : public AudioOutputI2S {
     leveler.transform(sample, leveled);
     if (!AudioOutputI2S::ConsumeSample(leveled)) return false;
     leveler.accepted(sample);
+    clock.accepted();
     return true;
   }
   bool SetRate(int hz) override {
@@ -929,10 +940,12 @@ class RadioI2SOutput : public AudioOutputI2S {
       return false;
     }
     codecRate = hz;
+    clock.rate(hz);
     Serial.printf("[RADIO] sample rate: %d Hz\n", hz);
     return true;
   }
   bool codecConfigured() const { return healthy && codecRate > 0; }
+  uint32_t elapsedMs()const{return clock.ms();}
 
   void drainEndOfTrack() {
     if (!i2sOn || txPaused) return;
@@ -970,6 +983,7 @@ class RadioI2SOutput : public AudioOutputI2S {
 
  private:
   AudioLeveler leveler;
+  Mp3SampleClock clock;
   bool txPaused = false;
   bool healthy = true;
   int codecRate = 0;
@@ -1018,8 +1032,10 @@ static void radioAudioTask(void *) {
   bool wifiSleepChanged = false;
   auto snapshotMp3 = [&]() {
     const int state=mp3State.load();
+    if(output&&(state==2||state==3))mp3ElapsedMs.store(output->elapsedMs());
     desk_log_mp3(state,state&&playingMp3Path[0]?playingMp3Track+1:0,
       mp3Source?(uint32_t)mp3Source->buffered():0,state==1?0:mp3Progress.load());
+    desk_log_mp3_time(mp3ElapsedMs.load(),mp3DurationMs.load(),mp3DurationEstimated.load());
   };
   auto logMp3 = [&](int level,const char *event,int32_t b,const char *detail) {
     snapshotMp3();desk_log_event(level,event,playingMp3Path[0]?playingMp3Track+1:0,b,detail);
@@ -1178,6 +1194,7 @@ static void radioAudioTask(void *) {
           xSemaphoreGive(mp3RequestMutex);
         }
         strlcpy(playingMp3Path,path,sizeof(playingMp3Path));
+        mp3ElapsedMs.store(0);mp3DurationMs.store(0);mp3DurationEstimated.store(false);mp3Progress.store(0);
         logMp3(DESK_LOG_INFO,"MP3_OPEN_BEGIN",(int)repeatMode,repeatingMp3?"automatic repeat":"manual play");
         if(path[0])desk_log_text(DESK_LOG_INFO,"MP3_PLAY_PATH",playingMp3Track+1,path);
         if (canStartRadio && deskFontSdMounted() && path[0]) {
@@ -1185,6 +1202,7 @@ static void radioAudioTask(void *) {
           auto *sdSource = new BufferedSdSource(path);
           source = sdSource;
           mp3Source = sdSource;
+          if(sdSource){const auto d=sdSource->duration();mp3DurationMs.store(d.ms);mp3DurationEstimated.store(d.estimated);}
           const uint32_t bufferStarted = millis();
           while (sdSource && sdSource->isOpen() && !sdSource->ready() &&
                  radioCommand.load() == -1 && millis() - bufferStarted < 3000) vTaskDelay(1);
@@ -1239,7 +1257,7 @@ static void radioAudioTask(void *) {
             source = hls;
             opened = hls && hls->begin(command - 6, networkHttpMutex, &radioCommand);
           } else {
-            auto *icy = new AudioFileSourceICYStream();
+            auto *icy = new MeteredIcySource();
             source = icy;
             if (icy) { icy->SetReconnect(3, 500); opened = icy->open(url.c_str()); }
           }
@@ -1343,9 +1361,9 @@ static void radioAudioTask(void *) {
       const uint32_t now = millis();
       if (now - lastMp3ProgressMs >= kMp3UiPeriodMs) {
         lastMp3ProgressMs = now;
-        const uint32_t size = source->getSize();
-        if (size) mp3Progress.store((int)std::min((uint64_t)1000,
-                                                (uint64_t)source->getPos() * 1000 / size));
+        const uint32_t elapsed=output?output->elapsedMs():0,total=mp3DurationMs.load();
+        mp3ElapsedMs.store(elapsed);
+        mp3Progress.store(total?std::min<uint64_t>(1000,uint64_t(elapsed)*1000/total):0);
       }
       if (appliedVolume.load() != desiredAudioVolume.load()) (void)applyDesiredAudioVolume();
       if (!output || !output->codecConfigured() || !decoder->isRunning() ||
@@ -1354,6 +1372,8 @@ static void radioAudioTask(void *) {
         const bool reachedEnd = output && output->codecConfigured() && size &&
                                 source->getPos() >= size && decoder->isRunning();
         const bool cancelled=!reachedEnd&&radioCommand.load()!=-1;
+        if(output)mp3ElapsedMs.store(output->elapsedMs());
+        if(reachedEnd){mp3DurationMs.store(mp3ElapsedMs.load());mp3DurationEstimated.store(false);}
         char detail[112];snprintf(detail,sizeof(detail),"pos=%lu size=%lu sd_failed=%d codec=%d decoder=%d",
           (unsigned long)source->getPos(),(unsigned long)size,mp3Source&&mp3Source->failed(),
           output&&output->codecConfigured(),decoder->isRunning());
@@ -2153,9 +2173,9 @@ static void updateMp3Screen() {
   }
   if (mp3TrackCount) {
     const int selected = mp3SelectedTrack.load();
-    const String &path = mp3Tracks[selected];
-    const int slash = path.lastIndexOf('/');
-    setText(panel->title, path.c_str() + slash + 1);
+    const char *path = mp3Tracks[selected].c_str();
+    const char *slash = strrchr(path,'/');
+    setText(panel->title, slash?slash+1:path);
     char countText[40];
     snprintf(countText, sizeof(countText), "%d / %d 首", selected + 1, mp3TrackCount);
     setText(panel->count, countText);
@@ -2167,7 +2187,17 @@ static void updateMp3Screen() {
                        state == 3 ? "已暫停" : state == 4 ? "開啟或解碼失敗" :
                        state == 5 ? "播放已結束" :
                        mp3TrackCount ? "已停止" : mp3StorageStatus;
-  setText(panel->status, status);
+  char timeStatus[100];
+  const uint32_t played=mp3ElapsedMs.load()/1000,totalMs=mp3DurationMs.load();
+  const uint32_t remaining=totalMs>mp3ElapsedMs.load()?(totalMs-mp3ElapsedMs.load()+999)/1000:0;
+  if(state>=2&&state<=5) {
+    if(totalMs)snprintf(timeStatus,sizeof(timeStatus),"%lu:%02lu  /  -%s%lu:%02lu",
+      (unsigned long)(played/60),(unsigned long)(played%60),mp3DurationEstimated.load()?"約":"",
+      (unsigned long)(remaining/60),(unsigned long)(remaining%60));
+    else snprintf(timeStatus,sizeof(timeStatus),"%lu:%02lu  /  --:--",(unsigned long)(played/60),(unsigned long)(played%60));
+    setText(panel->time,timeStatus);
+  } else setText(panel->time,"0:00  /  --:--");
+  setText(panel->status,status);
   setText(lv_obj_get_child(panel->play, 0), state == 2 ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
   lv_bar_set_value(panel->progress, mp3Progress.load() * kMp3ProgressWidth / 1000, LV_ANIM_OFF);
 }
@@ -2185,25 +2215,29 @@ static void requestMp3Scan() {
 }
 
 static void scanMp3InBackground() {
-  String tracks[kMp3MaxTracks];
+  auto *tracks=static_cast<Mp3Track *>(heap_caps_calloc(kMp3MaxTracks,sizeof(Mp3Track),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+  if(!tracks){
+    desk_log_event(DESK_LOG_ERROR,"MP3_SCAN_FAILED",0,kMp3MaxTracks,"PSRAM catalog allocation; existing playlist preserved");
+    mp3ScanPending.store(false);return;
+  }
   int count = 0,seen=0,longPaths=0;
   const uint32_t started=millis(),scan=++mp3CatalogId;
   bool complete=false;
-  desk_log_event(DESK_LOG_INFO,"MP3_SCAN_BEGIN",scan,kMp3MaxTracks,"/music direct files; directory entry limit=256");
+  desk_log_event(DESK_LOG_INFO,"MP3_SCAN_BEGIN",scan,kMp3MaxTracks,"/music direct files; directory entry limit=4096; PSRAM catalog");
   const char *status = "SD 卡未掛載";
   // Mounting and directory traversal run without holding the LVGL mutex.
   if (deskFontMountSd()) {
     File folder = SD_MMC.open("/music");
     if (!folder || !folder.isDirectory()) status = "缺少 /music 資料夾";
     else {
-      for (; seen < 256 && count < kMp3MaxTracks; ++seen) {
+      for (; seen < 4096 && count < kMp3MaxTracks; ++seen) {
         File entry = folder.openNextFile();
         if (!entry) break;
         if (!entry.isDirectory()) {
           String path = entry.path(), lower = path;
           lower.toLowerCase();
           if (lower.endsWith(".mp3")) {
-            if(path.length()<kMp3PathSize)tracks[count++]=path;
+            if(path.length()<kMp3PathSize)strlcpy(tracks[count++].path,path.c_str(),kMp3PathSize);
             else ++longPaths;
           }
         }
@@ -2211,22 +2245,14 @@ static void scanMp3InBackground() {
         vTaskDelay(1);
       }
       folder.close();
-      for (int i = 1; i < count; ++i) {
-        String item = tracks[i];
-        int j = i;
-        while (j > 0 && tracks[j - 1].compareTo(item) > 0) {
-          tracks[j] = tracks[j - 1];
-          --j;
-        }
-        tracks[j] = item;
-      }
+      std::sort(tracks,tracks+count,[](const Mp3Track &a,const Mp3Track &b){return strcmp(a.path,b.path)<0;});
       status = count ? "已找到 MP3" : "找不到 MP3";
       complete=true;
     }
   }
   desk_log_event(complete?(count?DESK_LOG_INFO:DESK_LOG_WARN):DESK_LOG_ERROR,
     complete?(count?"MP3_SCAN_FOUND":"MP3_SCAN_EMPTY"):"MP3_SCAN_FAILED",scan,count,status);
-  if(count>=kMp3MaxTracks||seen>=256)
+  if(count>=kMp3MaxTracks||seen>=4096)
     desk_log_event(DESK_LOG_WARN,"MP3_SCAN_LIMIT",count,seen,"scan cap reached; later entries not checked");
   if(longPaths)desk_log_event(DESK_LOG_WARN,"MP3_PATH_SKIPPED",longPaths,kMp3PathSize-1,"path exceeds player byte limit");
   desk_log_event(DESK_LOG_INFO,"MP3_LIST_BEGIN",scan,count,"sorted playable playlist; track numbers are 1-based");
@@ -2236,19 +2262,20 @@ static void scanMp3InBackground() {
     // Only a newly inserted card needs font registration, which uses LVGL APIs.
     if (deskFontSdMounted()) deskFontInitSd();
     xSemaphoreTake(mp3RequestMutex, portMAX_DELAY);
-    for (int i = 0; i < count; ++i) mp3Tracks[i] = std::move(tracks[i]);
-    for (int i = count; i < mp3TrackCount; ++i) mp3Tracks[i] = "";
+    auto *oldTracks=mp3Tracks;mp3Tracks=tracks;tracks=oldTracks;
     mp3TrackCount = count;
     desk_log_mp3_count(count);
     mp3SelectedTrack.store(0);
     xSemaphoreGive(mp3RequestMutex);
     mp3StorageStatus = status;
     mp3Progress.store(0);
+    mp3ElapsedMs.store(0);mp3DurationMs.store(0);mp3DurationEstimated.store(false);
     mp3State.store(0);
     mp3ScanPending.store(false);
     updateMp3Screen();
     lvgl_port_unlock();
   }
+  free(tracks);
   Serial.printf("[MP3] scan tracks=%d status=%s\n", count, status);
   char detail[112];snprintf(detail,sizeof(detail),"ms=%lu entries=%d long_paths=%d; %s",
     (unsigned long)(millis()-started),seen,longPaths,status);
@@ -2561,8 +2588,9 @@ static void buildSettings() {
   lv_obj_set_style_text_font(settingsMp3.title, &desk_font_16_bold, 0);
   lv_label_set_long_mode(settingsMp3.title, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
   lv_obj_set_height(settingsMp3.title, lv_font_get_line_height(&desk_font_16_bold));
-  settingsMp3.status = label(mp3Page, "尚未掃描", 20, 65, 365);
+  settingsMp3.status = label(mp3Page, "尚未掃描", 20, 65, 116);
   settingsMp3.count = label(mp3Page, "0 首", 20, 92, 116);
+  settingsMp3.time = label(mp3Page,"0:00  /  --:--",143,65,kMp3ProgressWidth);
   settingsMp3.progress = lv_bar_create(mp3Page);
   lv_obj_set_pos(settingsMp3.progress, 143, 100);
   lv_obj_set_size(settingsMp3.progress, kMp3ProgressWidth, 8);
@@ -2692,6 +2720,7 @@ static bool takeBackgroundHttpMutex() {
 
 static esp_err_t httpEvent(esp_http_client_event_t *event) {
   if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
+  desk_log_net_rx(event->data_len);
   HttpBuffer *buf = (HttpBuffer *)event->user_data;
   if (buf->body.length() + event->data_len > buf->limit) { buf->overflow = true; return ESP_FAIL; }
   buf->body.concat((const char *)event->data, event->data_len);
@@ -3068,6 +3097,7 @@ struct FuturesStream {
 
 static esp_err_t futuresEvent(esp_http_client_event_t *event) {
   if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
+  desk_log_net_rx(event->data_len);
   FuturesStream *stream = (FuturesStream *)event->user_data;
   stream->received += event->data_len;
   if (stream->received > 1500000) { stream->overflow = true; return ESP_FAIL; }

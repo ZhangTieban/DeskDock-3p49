@@ -15,7 +15,10 @@ Get-ChildItem -LiteralPath $LogDirectory -Filter '*.jsonl' -File | Sort-Object N
         heap=$row.heap;largest=$row.largest;min_heap=$row.min_heap;psram=$row.psram;rssi=$row.rssi;
         station=$row.station;audio_state=$row.audio_state;buffer=$row.buffer;
         mp3_state=$row.mp3_state;mp3_track=$row.mp3_track;mp3_tracks=$row.mp3_tracks;
-        mp3_buffer=$row.mp3_buffer;mp3_progress=$row.mp3_progress}
+        mp3_buffer=$row.mp3_buffer;mp3_progress=$row.mp3_progress;
+        mp3_elapsed_ms=$row.mp3_elapsed_ms;mp3_duration_ms=$row.mp3_duration_ms;mp3_remaining_ms=$row.mp3_remaining_ms;
+        mp3_duration_estimated=$row.mp3_duration_estimated;cpu0_permille=$row.cpu0_permille;cpu1_permille=$row.cpu1_permille;
+        battery_mv=$row.battery_mv;net_rx_Bps=$row.net_rx_Bps;net_rx_bytes=$row.net_rx_bytes;metrics_window_ms=$row.metrics_window_ms}
     } catch {$bad++;Write-Warning ('Invalid/incomplete JSON at {0}:{1}; original file preserved' -f $source,$number)}
   }
 } | Export-Csv -LiteralPath $OutCsv -NoTypeInformation -Encoding $encoding

@@ -39,7 +39,11 @@ int main() {
     for(unsigned i=0;i<plan.count;i++){
       const auto &p=plan.periods[i];assert(same(p,again.periods[i]));assert(p.end>p.start);
       if(i)assert(p.start==plan.periods[i-1].end);
-      if(p.kind!=PetPeriodKind::Fixed)freeSeconds+=p.end-p.start;
+      if(p.kind!=PetPeriodKind::Fixed&&p.kind!=PetPeriodKind::Visit)freeSeconds+=p.end-p.start;
+      if(p.kind==PetPeriodKind::Visit){
+        assert(p.action==PetAction::VisitPlay&&p.end-p.start==7200);
+        assert(p.start>=840*60&&p.end<=1050*60);
+      }
       if(p.kind==PetPeriodKind::Base){
         assert(p.action==PetAction::Lie||p.action==PetAction::Sit||p.action==PetAction::Walk||p.action==PetAction::Ball);
         basicSeconds+=p.end-p.start;
@@ -61,5 +65,27 @@ int main() {
     }
   }
   assert(days==365);
+  unsigned saturdays=0,sundays=0;
+  for(int year=2024;year<=2032;year++)for(int month=1;month<=12;month++)for(int day=1;day<=31;day++){
+    const PetDate d{year,month,day};if(!petDateValid(d))continue;
+    const int start=petVisitStart(d),weekday=petWeekday(d);
+    if(weekday==6){
+      const PetDate sunday=petAdjacentDate(d,1);
+      assert((start>=0)+(petVisitStart(sunday)>=0)==1);
+      assert(petAdjacentDate(sunday,-1).day==d.day);
+      if(start>=0)saturdays++;
+    }
+    if(start>=0){
+      assert(weekday==0||weekday==6);assert(buildPetDaySchedule(d,plan));
+      unsigned visits=0;for(unsigned i=0;i<plan.count;i++)if(plan.periods[i].kind==PetPeriodKind::Visit)visits++;
+      assert(visits==1);
+      const int bath=petBathStart(d);
+      if(weekday==0){sundays++;assert(start+120<=bath||start>=bath+60);}
+    }
+  }
+  assert(saturdays&&sundays);
+  assert(petVisitPhase(23)==PetAction::VisitArrive&&petVisitPhase(24)==PetAction::VisitPlay);
+  assert(petVisitPhase(204)==PetAction::VisitRest&&petVisitPhase(7176)==PetAction::VisitLeave);
   std::printf("PASS: approved preview parity, %u daily plans, all fixed-minute boundaries, maximum %u periods\n",days,maxPeriods);
+  std::printf("PASS: 9 years of one-visit-per-weekend boundaries, %u Saturdays / %u Sundays, bath preserved\n",saturdays,sundays);
 }

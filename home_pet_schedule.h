@@ -14,7 +14,7 @@ static constexpr PetAction scheduledPetAction(int minute, PetAction daytime) {
 }
 
 struct PetDate { int year, month, day; };
-enum class PetPeriodKind : uint8_t { Fixed, Base, Girl, Accent, GirlAccent };
+enum class PetPeriodKind : uint8_t { Fixed, Base, Girl, Accent, GirlAccent, Visit };
 struct PetPeriod {
   uint32_t start, end; // seconds since local midnight (minutes only inside builder)
   PetAction action;
@@ -42,6 +42,27 @@ static uint32_t petDateHash(const char *prefix,PetDate d) {
 static int petBathStart(PetDate d) {
   return petDateValid(d)&&petWeekday(d)==0 ? 840+petDateHash("DeskDock-demo-7893|",d)%121 : -1;
 }
+static PetDate petAdjacentDate(PetDate d,int direction) {
+  d.day+=direction;
+  if(direction>0&&!petDateValid(d)){d.day=1;if(++d.month==13){d.month=1;++d.year;}}
+  if(d.day==0){if(--d.month==0){d.month=12;--d.year;}d.day=31;while(!petDateValid(d))--d.day;}
+  return d;
+}
+// One two-hour visit per weekend, 14:00–17:30, excluding the Sunday bath.
+// Both dates derive the same choice from Saturday, so resets cannot reroll it.
+static int petVisitStart(PetDate date) {
+  if(!petDateValid(date))return -1;
+  const int weekday=petWeekday(date);if(weekday!=0&&weekday!=6)return -1;
+  const PetDate saturday=weekday==6?date:petAdjacentDate(date,-1);
+  const int bath=petBathStart(petAdjacentDate(saturday,1));
+  const int before=std::max(0,bath-840-120+1),after=std::max(0,1050-(bath+60)-120+1);
+  const bool sunday=(petDateHash("DeskDock-visit-day|",saturday)&1)&&(before+after>0);
+  if(sunday!=(weekday==0))return -1;
+  uint32_t pick=petDateHash("DeskDock-visit-time|",saturday);
+  if(!sunday)return 840+pick%91;
+  pick%=before+after;
+  return pick<(unsigned)before?840+pick:bath+60+pick-before;
+}
 struct PetRandom {
   uint32_t seed;
   uint32_t next(uint32_t n) {
@@ -53,17 +74,19 @@ static bool buildPetDaySchedule(PetDate date,PetDaySchedule &out) {
   out.count=0;if(!petDateValid(date))return false;
   PetRandom rng{petDateHash("DeskDock-daily-7893|",date)};
   if(!rng.seed)rng.seed=0x6d2b79f5;
-  PetPeriod fixed[7]={{0,420,PetAction::Sleep,PetPeriodKind::Fixed},
+  PetPeriod fixed[8]={{0,420,PetAction::Sleep,PetPeriodKind::Fixed},
     {480,490,PetAction::Eat,PetPeriodKind::Fixed},{780,840,PetAction::Sleep,PetPeriodKind::Fixed},
     {1050,1080,PetAction::Leash,PetPeriodKind::Fixed},{1080,1110,PetAction::Eat,PetPeriodKind::Fixed},
     {1320,1440,PetAction::Sleep,PetPeriodKind::Fixed}};
   unsigned fixedCount=6;
   const int bath=petBathStart(date);
   if(bath>=0)fixed[fixedCount++]={(uint32_t)bath,(uint32_t)bath+60,PetAction::BathPrepare,PetPeriodKind::Fixed};
+  const int visit=petVisitStart(date);
+  if(visit>=0)fixed[fixedCount++]={(uint32_t)visit,(uint32_t)visit+120,PetAction::VisitPlay,PetPeriodKind::Visit};
   auto order=[](const PetPeriod &a,const PetPeriod &b){return a.start<b.start;};
   std::sort(fixed,fixed+fixedCount,order);
   struct Window { uint32_t start,end; };
-  Window free[7],eligible[7];unsigned freeCount=0,eligibleCount=0;uint32_t at=0;
+  Window free[8],eligible[8];unsigned freeCount=0,eligibleCount=0;uint32_t at=0;
   for(unsigned i=0;i<fixedCount;i++){
     if(at<fixed[i].start){
       free[freeCount++]={at,fixed[i].start};
@@ -136,4 +159,9 @@ static const PetPeriod *petPeriodAt(const PetDaySchedule &plan,uint32_t seconds)
 static PetAction petBathPhase(uint32_t elapsedSeconds) {
   return elapsedSeconds<300?PetAction::BathPrepare:elapsedSeconds<1500?PetAction::BathScrub:
     elapsedSeconds<2400?PetAction::BathRinse:elapsedSeconds<3300?PetAction::BathDry:PetAction::BathShake;
+}
+static PetAction petVisitPhase(uint32_t elapsedSeconds) {
+  if(elapsedSeconds<24)return PetAction::VisitArrive;
+  if(elapsedSeconds>=7176)return PetAction::VisitLeave;
+  return (elapsedSeconds-24)%300<180?PetAction::VisitPlay:PetAction::VisitRest;
 }

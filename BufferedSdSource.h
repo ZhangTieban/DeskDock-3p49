@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include "sd_access.h"
+#include "mp3_timing.h"
 
 // One SD producer; the decoder consumes encoded bytes from a 64 KiB PSRAM ring.
 class BufferedSdSource final : public AudioFileSource {
@@ -14,7 +15,24 @@ class BufferedSdSource final : public AudioFileSource {
     ring_ = static_cast<uint8_t *>(heap_caps_malloc(kCapacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     done_ = xSemaphoreCreateBinary();
     if (!ring_ || !done_) return;
-    { DeskSdLock lock; file_ = SD_MMC.open(path, FILE_READ); if (file_) size_ = file_.size(); }
+    { DeskSdLock lock;
+      file_ = SD_MMC.open(path, FILE_READ);
+      if (file_) {
+        size_ = file_.size();
+        uint8_t tag[10]={};uint32_t skip=0,end=size_;
+        if(file_.read(tag,10)==10&&!memcmp(tag,"ID3",3)&&tag[3]>=2&&tag[3]<=4&&
+           !(tag[6]&128)&&!(tag[7]&128)&&!(tag[8]&128)&&!(tag[9]&128)) {
+          skip=10+(uint32_t(tag[6])<<21)+(uint32_t(tag[7])<<14)+(uint32_t(tag[8])<<7)+tag[9];
+          if(tag[3]==4&&(tag[5]&16))skip+=10;
+        }
+        if(size_>=128&&file_.seek(size_-128)&&file_.read(tag,3)==3&&!memcmp(tag,"TAG",3))end-=128;
+        if(skip<end&&file_.seek(skip)) {
+          const size_t got=file_.read(ring_,std::min<uint32_t>(kCapacity,end-skip));
+          duration_=mp3ProbeDuration(ring_,got,end-skip);
+        }
+        file_.seek(0);
+      }
+    }
     if (!file_ || !size_) return;
     worker_ = xTaskCreatePinnedToCore(workerEntry, "mp3-sd", 4096, this, 2, nullptr, 0) == pdPASS;
   }
@@ -25,6 +43,7 @@ class BufferedSdSource final : public AudioFileSource {
   size_t buffered() const { return write_.load() - read_.load(); }
   bool ready() const { return buffered() >= std::min(size_, uint32_t(32768)) || eof_.load(); }
   bool failed() const { return failed_.load(); }
+  Mp3Duration duration() const { return duration_; }
   uint32_t read(void *data, uint32_t length) override {
     uint32_t copied = 0;
     const uint32_t started = millis();
@@ -97,6 +116,7 @@ class BufferedSdSource final : public AudioFileSource {
   SemaphoreHandle_t done_ = nullptr;
   bool worker_ = false;
   uint32_t size_ = 0, consumed_ = 0;
+  Mp3Duration duration_;
   std::atomic<size_t> read_{0}, write_{0};
   std::atomic<bool> stop_{false}, eof_{false}, failed_{false}, seekPending_{false};
   std::atomic<uint32_t> seekTarget_{0};

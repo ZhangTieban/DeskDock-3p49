@@ -563,9 +563,10 @@ static void buildHome() {
   homeMp3.status = label(homeMp3Pane, "", 0, 67, 170);
   homeMp3.count = label(homeMp3Pane, "", 175, 67, kHomeContentW - 175);
   lv_obj_set_style_text_align(homeMp3.count, LV_TEXT_ALIGN_RIGHT, 0);
+  homeMp3.time = label(homeMp3Pane,"0:00  /  --:--",0,85,kHomeContentW);
   homeMp3.progress = lv_bar_create(homeMp3Pane);
-  lv_obj_set_pos(homeMp3.progress, 0, 92);
-  lv_obj_set_size(homeMp3.progress, kHomeContentW, 6);
+  lv_obj_set_pos(homeMp3.progress, 0, 104);
+  lv_obj_set_size(homeMp3.progress, kHomeContentW, 2);
   lv_bar_set_range(homeMp3.progress, 0, kMp3ProgressWidth);
   button(homeMp3Pane, LV_SYMBOL_LEFT, 12, 107, 50, 43, previousMp3);
   homeMp3.play = button(homeMp3Pane, LV_SYMBOL_PLAY, 72, 107, 137, 43, toggleMp3);
