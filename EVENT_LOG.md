@@ -1,6 +1,8 @@
 # SD 異常事件紀錄（0.2.14，始於 0.2.11 本機測試）
 
 OTA 安裝此版後，插著 FAT32 SD 卡開機，程式會自行建立 `/logs`，不需先建資料夾或開啟選項。
+
+電池顯示設定記錄 `BATTERY_MODE`（a=0依電壓、1已安裝、2手動隱藏；b=量測毫伏），開機及切換時記錄。舊 `batt_mode2=2` 的隱藏預設被改為依電壓判斷時，記錄 `BATTERY_MODE_MIGRATED`（a=舊模式、b=新模式）。新選擇使用 `batt_mode3` 保存，不再把舊隱藏預設視為手動選擇。
 開機序列埠會顯示 `[EVENTLOG] ready /logs/events-....jsonl`。原有 fonts、music、update 與設定保留。
 
 每次開機建立獨立 JSONL 檔，一行一筆事件；單檔達 8 MiB 另開新檔，**不自動刪除或覆寫舊紀錄**。

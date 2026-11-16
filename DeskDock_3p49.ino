@@ -112,7 +112,7 @@ struct Config {
   int carouselSeconds = 10;
   bool carouselPaused = false;
   bool hour12 = false;
-  int batteryMode = 2; // 0: voltage fallback, 1: installed, 2: absent
+  int batteryMode = 0; // 0: voltage fallback, 1: installed, 2: explicitly hidden
 };
 struct WeatherData {
   String summary = "等待 Open-Meteo 資料";
@@ -147,7 +147,7 @@ static PendingSetting pendingSettings[] = {
   {"home_rotate", 0, false}, {"county", 0, false}, {"county1", 0, false},
   {"county2", 0, false}, {"county3", 0, false}, {"county4", 0, false},
   {"county5", 0, false}, {"hour12", 0, true}, {"rotate_pause", 0, true},
-  {"weather_count", 0, false}
+  {"weather_count", 0, false}, {"batt_mode3", 0, false}
 };
 static std::atomic<uint32_t> pendingSettingsMask{0}, settingsChangedAt{0};
 static std::atomic<bool> factoryResetActive{false};
@@ -332,7 +332,7 @@ static lv_obj_t *weatherRegionRows[kWeatherSlots], *weatherCountLabel;
 static lv_obj_t *weatherRegionButtons[kWeatherSlots], *weatherCityScreen, *weatherCityTitle;
 static lv_obj_t *weatherCityButtons[kCountyCount];
 static uint8_t weatherCitySlot = 0;
-static lv_obj_t *stockPreviewLabel, *hourModeButton;
+static lv_obj_t *stockPreviewLabel, *hourModeButton, *batteryModeButton;
 static lv_obj_t *otaButton, *otaStatusLabel;
 static void otaButtonClicked(lv_event_t *);
 static void otaOpenPanel(lv_event_t *);
@@ -466,11 +466,11 @@ static void loadConfig() {
   cfg.hour12 = prefs.getBool("hour12", false);
   cfg.carouselSeconds = constrain(prefs.getInt("home_rotate", 10), 5, 60);
   cfg.carouselPaused = prefs.getBool("rotate_pause", false);
-  cfg.batteryMode = constrain(prefs.getInt("batt_mode2", 2), 0, 3);
-  if (cfg.batteryMode == 3) {
-    cfg.batteryMode = 0;
-    prefs.putInt("batt_mode2", cfg.batteryMode);
-  }
+  const int legacyBatteryMode=prefs.getInt("batt_mode2",-1);
+  const int savedBatteryMode=prefs.getInt("batt_mode3",-1);
+  cfg.batteryMode=deskBatteryMode(savedBatteryMode,legacyBatteryMode);
+  if(savedBatteryMode<0&&legacyBatteryMode==2)
+    desk_log_event(DESK_LOG_INFO,"BATTERY_MODE_MIGRATED",legacyBatteryMode,cfg.batteryMode,"legacy hidden default -> voltage detection; other settings preserved");
   for (int i = 0; i < kWeatherSlots; ++i) {
     const String key = i ? String("om") + i : String("last_om");
     const String stampKey = i ? String("om_at") + i : String("last_om_at");
@@ -717,9 +717,7 @@ static void sampleBattery() {
 }
 
 static bool batteryPresent() {
-  if (cfg.batteryMode == 2) return false;
-  if (cfg.batteryMode == 1) return true;
-  return batteryMv >= 2900;
+  return deskBatteryVisible(cfg.batteryMode,batteryMv);
 }
 
 static bool expanderWrite(uint8_t reg, uint8_t value) {
@@ -2109,6 +2107,16 @@ static void changeHourMode(lv_event_t *) {
   lv_label_set_text(lv_obj_get_child(hourModeButton, 0), cfg.hour12 ? "12 小時" : "24 小時");
   lastInputMs = millis();
 }
+static const char *batteryModeText() {
+  return cfg.batteryMode==1?"電池已裝":cfg.batteryMode==2?"隱藏電壓":"電池自動";
+}
+static void changeBatteryMode(lv_event_t *) {
+  cfg.batteryMode=(cfg.batteryMode+1)%3;
+  deferSetting(13,cfg.batteryMode);
+  lv_label_set_text(lv_obj_get_child(batteryModeButton,0),batteryModeText());
+  desk_log_event(DESK_LOG_INFO,"BATTERY_MODE",cfg.batteryMode,batteryMv,"0=voltage detection; 1=installed; 2=hidden");
+  lastInputMs=millis();
+}
 
 static void adjustButton(lv_obj_t *parent, const char *text, int x, int y,
                          lv_event_cb_t callback, int delta, int width = 44,
@@ -2502,9 +2510,10 @@ static void buildSettings() {
   adjustButton(generalCards[2], "-", 9, 26, changeVolume, -5, 86, 27);
   adjustButton(generalCards[2], "+", 105, 26, changeVolume, 5, 86, 27);
 
-  generalLabel(generalCards[3], "時間格式", 10, 2, 180);
+  generalLabel(generalCards[3], "時間／電池", 10, 2, 180);
   hourModeButton = generalButton(generalCards[3], cfg.hour12 ? "12 小時" : "24 小時",
-                                 9, 26, 182, 27, changeHourMode);
+                                 9, 26, 86, 27, changeHourMode);
+  batteryModeButton=generalButton(generalCards[3],batteryModeText(),105,26,86,27,changeBatteryMode);
 
   generalLabel(generalCards[4], "內容輪播", 10, 2, 90);
   carouselValueLabel = generalLabel(generalCards[4], "", 100, 5, 90);
@@ -3535,6 +3544,7 @@ void setup() {
   else Serial.println("[RTC] invalid/unavailable");
   Serial.printf("[BAT] %dmV %d%% (voltage estimate)\n", batteryMv, batteryPct);
   Serial.printf("[BAT] display mode=%d\n", cfg.batteryMode);
+  desk_log_event(DESK_LOG_INFO,"BATTERY_MODE",cfg.batteryMode,batteryMv,"boot; 0=voltage detection; 1=installed; 2=hidden");
   lcd_bl_pwm_bsp_init(255); // Active-low backlight: keep startup panel RAM hidden.
   lvgl_port_init();
   if (lvgl_port_lock(2000)) {
