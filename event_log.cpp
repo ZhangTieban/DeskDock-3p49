@@ -240,7 +240,7 @@ extern "C" bool desk_log_begin() {
   if(queue)return true;bootId=esp_random();
   queue=xQueueCreateWithCaps(128,sizeof(Event),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
   if(!queue){Serial.println("[EVENTLOG] queue allocation failed");return false;}
-  if(xTaskCreatePinnedToCore(worker,"SD events",6144,nullptr,1,nullptr,0)!=pdPASS){
+  if(xTaskCreatePinnedToCore(worker,"SD events",8192,nullptr,1,nullptr,0)!=pdPASS){
     vQueueDeleteWithCaps(queue);queue=nullptr;Serial.println("[EVENTLOG] task creation failed");return false;}
   heap_caps_register_failed_alloc_callback(allocFailed);
   originalPrintf=esp_log_set_vprintf(sdkPrintf);

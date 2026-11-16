@@ -1,4 +1,4 @@
-# SD 異常事件紀錄（0.2.12，始於 0.2.11 本機測試）
+# SD 異常事件紀錄（0.2.13，始於 0.2.11 本機測試）
 
 OTA 安裝此版後，插著 FAT32 SD 卡開機，程式會自行建立 `/logs`，不需先建資料夾或開啟選項。
 開機序列埠會顯示 `[EVENTLOG] ready /logs/events-....jsonl`。原有 fonts、music、update 與設定保留。
