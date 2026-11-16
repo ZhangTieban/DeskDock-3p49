@@ -185,6 +185,8 @@ static int mp3TrackCount = 0;
 static std::atomic<int> mp3SelectedTrack{0};
 static const char *mp3StorageStatus = "尚未掃描";
 static std::atomic<bool> mp3ScanPending{false}, mp3ScanRequested{false};
+static std::atomic<bool> mp3ListRequested{false};
+static uint32_t mp3CatalogId=0; // settingsIoTask is the only writer.
 
 static TaskHandle_t radioTaskHandle = nullptr;
 static TaskHandle_t networkTaskHandle = nullptr;
@@ -994,6 +996,7 @@ class RadioAACDecoder : public AudioGeneratorAAC {
 
 static void radioAudioTask(void *) {
   AudioFileSource *source = nullptr;
+  BufferedSdSource *mp3Source = nullptr;
   BestRadioHlsSource *hls = nullptr;
   AudioFileSourceBuffer *buffer = nullptr;
   uint8_t *encodedBuffer = nullptr;
@@ -1002,6 +1005,9 @@ static void radioAudioTask(void *) {
   bool mp3AtEof = false;
   int playingMp3Track = 0;
   uint32_t lastMp3ProgressMs = 0;
+  uint32_t lastMp3LogMs = 0;
+  bool mp3BufferWasLow = false;
+  char playingMp3Path[kMp3PathSize] = {};
   bool driverSwitched = false;
   uint32_t lastCueRestoreMs = 0;
   uint32_t lastAudioReport = 0;
@@ -1010,6 +1016,14 @@ static void radioAudioTask(void *) {
   uint8_t retryCount = 0;
   wifi_ps_type_t previousWifiSleep = WIFI_PS_MIN_MODEM;
   bool wifiSleepChanged = false;
+  auto snapshotMp3 = [&]() {
+    const int state=mp3State.load();
+    desk_log_mp3(state,state&&playingMp3Path[0]?playingMp3Track+1:0,
+      mp3Source?(uint32_t)mp3Source->buffered():0,state==1?0:mp3Progress.load());
+  };
+  auto logMp3 = [&](int level,const char *event,int32_t b,const char *detail) {
+    snapshotMp3();desk_log_event(level,event,playingMp3Path[0]?playingMp3Track+1:0,b,detail);
+  };
   auto closeStream = [&]() {
     audioStreamClosing.store(true);
     // Disable DMA before waiting for a source producer or HTTP teardown.
@@ -1023,6 +1037,7 @@ static void radioAudioTask(void *) {
     if (buffer) { delete buffer; buffer = nullptr; }
     if (encodedBuffer) { heap_caps_free(encodedBuffer); encodedBuffer = nullptr; }
     if (source) { delete source; source = nullptr; hls = nullptr; }
+    mp3Source = nullptr;mp3BufferWasLow=false;
     if (output) { output->stop(); delete output; output = nullptr; }
     audioStreamClosing.store(false);
   };
@@ -1061,17 +1076,20 @@ static void radioAudioTask(void *) {
         if (ok) {
           mp3State.store(pause ? 3 : 2);
           if (pause) restoreI2s();
+          logMp3(DESK_LOG_INFO,pause?"MP3_PAUSED":"MP3_RESUMED",mp3Progress.load(),"");
           Serial.println(pause ? "[MP3] paused" : "[MP3] resumed");
         } else {
           closeStream();
           restoreI2s();
           mp3State.store(4);
+          logMp3(DESK_LOG_ERROR,pause?"MP3_PAUSE_FAILED":"MP3_RESUME_FAILED",0,"I2S/codec transition failed");
           Serial.println(pause ? "[MP3] pause failed" : "[MP3] resume failed");
         }
       } else if (pause && mp3AtEof) {
         mp3AtEof = false;
         restoreI2s();
         mp3State.store(5);
+        logMp3(DESK_LOG_INFO,"MP3_ENDED",0,"pause requested at end of track");
       }
       command = -1;
     }
@@ -1095,6 +1113,8 @@ static void radioAudioTask(void *) {
       const bool mp3Requested = command == kMp3PlayCommand;
       const int previousMp3State = mp3State.load();
       const int previousRadioState = radioState.load();
+      if(previousMp3State>=1&&previousMp3State<=3&&mp3Source)
+        logMp3(DESK_LOG_INFO,"MP3_STOP",command,mp3Requested?"track change":"stop / switch source");
       if (command > 0 && !mp3Requested) activeRadioStation = command;
       if (command == 0 || mp3Requested || (command > 0 && !automaticRetry)) {
         retryStation = 0;
@@ -1107,6 +1127,9 @@ static void radioAudioTask(void *) {
                      command, previousRadioState, "");
       mp3State.store(mp3Requested ? 1 : 0);
       closeStream();
+      snapshotMp3();
+      if(previousMp3State>=1&&previousMp3State<=3&&!mp3Requested)
+        logMp3(DESK_LOG_INFO,"MP3_CLOSED",command,"resources released");
       radioLinkLost.store(false);
       codecMutedForLinkLoss.store(false);
       // A failed connection may have muted the codec before taking over I2S.
@@ -1154,10 +1177,14 @@ static void radioAudioTask(void *) {
           }
           xSemaphoreGive(mp3RequestMutex);
         }
+        strlcpy(playingMp3Path,path,sizeof(playingMp3Path));
+        logMp3(DESK_LOG_INFO,"MP3_OPEN_BEGIN",(int)repeatMode,repeatingMp3?"automatic repeat":"manual play");
+        if(path[0])desk_log_text(DESK_LOG_INFO,"MP3_PLAY_PATH",playingMp3Track+1,path);
         if (canStartRadio && deskFontSdMounted() && path[0]) {
           takeStreamI2s();
           auto *sdSource = new BufferedSdSource(path);
           source = sdSource;
+          mp3Source = sdSource;
           const uint32_t bufferStarted = millis();
           while (sdSource && sdSource->isOpen() && !sdSource->ready() &&
                  radioCommand.load() == -1 && millis() - bufferStarted < 3000) vTaskDelay(1);
@@ -1169,15 +1196,21 @@ static void radioAudioTask(void *) {
                 decoder->begin(source, output) && output->codecConfigured()) {
               mp3Progress.store(0);
               mp3State.store(2);
+              lastMp3LogMs=millis();
+              char detail[80];snprintf(detail,sizeof(detail),"size_bytes=%lu repeat=%u",
+                (unsigned long)source->getSize(),(unsigned)repeatMode);
+              logMp3(DESK_LOG_INFO,"MP3_PLAYING",0,detail);
               Serial.printf("[MP3] playing %s\n", path);
             }
           }
         }
         if (mp3State.load() != 2) {
-          desk_log_event(DESK_LOG_ERROR,"MP3_OPEN_FAILED",playingMp3Track,0,"SD open / decoder / I2S");
+          const bool cancelled=radioCommand.load()!=-1;
           closeStream();
           restoreI2s();
           mp3State.store(4);
+          logMp3(cancelled?DESK_LOG_INFO:DESK_LOG_ERROR,cancelled?"MP3_OPEN_CANCELLED":"MP3_OPEN_FAILED",0,
+            cancelled?"new audio command":"SD open / decoder / I2S / unavailable track");
           Serial.printf("[MP3] open/decode failed %s\n", path);
         }
       } else if (WiFi.status() != WL_CONNECTED || !canStartRadio) {
@@ -1320,6 +1353,12 @@ static void radioAudioTask(void *) {
         const uint32_t size = source->getSize();
         const bool reachedEnd = output && output->codecConfigured() && size &&
                                 source->getPos() >= size && decoder->isRunning();
+        const bool cancelled=!reachedEnd&&radioCommand.load()!=-1;
+        char detail[112];snprintf(detail,sizeof(detail),"pos=%lu size=%lu sd_failed=%d codec=%d decoder=%d",
+          (unsigned long)source->getPos(),(unsigned long)size,mp3Source&&mp3Source->failed(),
+          output&&output->codecConfigured(),decoder->isRunning());
+        logMp3(reachedEnd||cancelled?DESK_LOG_INFO:DESK_LOG_ERROR,
+          reachedEnd?"MP3_EOF":cancelled?"MP3_CANCELLED":"MP3_DECODE_FAILED",(int)mp3Repeat.load(),detail);
         Serial.println(reachedEnd ? "[MP3] playback ended" : "[MP3] playback interrupted");
         if (reachedEnd && output) output->drainEndOfTrack();
         closeStream();
@@ -1331,6 +1370,7 @@ static void radioAudioTask(void *) {
           restoreI2s();
           mp3State.store(reachedEnd ? 5 : 4);
         }
+        logMp3(DESK_LOG_INFO,"MP3_CLOSED",mp3State.load(),"resources released after playback");
       }
     }
     if (radioCommand.load()==-1 && deskCueNeedsRestore(driverSwitched,decoder != nullptr,
@@ -1338,6 +1378,21 @@ static void radioAudioTask(void *) {
         (uint32_t)(millis()-lastCueRestoreMs)>=1000) restoreI2s();
     desk_log_audio(radioStation.load(),radioState.load(),hls ? hls->buffered() :
                    buffer ? buffer->getFillLevel() : 0);
+    snapshotMp3();
+    if(mp3Source&&mp3State.load()==2){
+      const uint32_t size=mp3Source->getSize(),pos=mp3Source->getPos();
+      const uint32_t remaining=size>pos?size-pos:0,fill=mp3Source->buffered();
+      const bool low=deskMp3BufferLow(mp3BufferWasLow,true,fill,remaining);
+      if(low!=mp3BufferWasLow){mp3BufferWasLow=low;
+        logMp3(low?DESK_LOG_WARN:DESK_LOG_INFO,low?"MP3_BUFFER_LOW":"MP3_BUFFER_RECOVERED",fill,"");}
+    }
+    if((mp3State.load()==2||mp3State.load()==3)&&millis()-lastMp3LogMs>=30000){
+      lastMp3LogMs=millis();char detail[96];
+      snprintf(detail,sizeof(detail),"pos=%lu size=%lu repeat=%u",
+        (unsigned long)(mp3Source?mp3Source->getPos():0),(unsigned long)(mp3Source?mp3Source->getSize():0),
+        (unsigned)mp3Repeat.load());
+      logMp3(DESK_LOG_INFO,"MP3_STATUS",uxTaskGetStackHighWaterMark(nullptr),detail);
+    }
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
@@ -2119,8 +2174,10 @@ static void updateMp3Screen() {
 
 static void requestMp3Scan() {
   const int state = mp3State.load();
-  if (mp3ScanPending.load() || !mp3RequestMutex || radioCommand.load() == kMp3PlayCommand) return;
-  if (state == 1 || state == 2 || state == 3) return;
+  if (mp3ScanPending.load() || !mp3RequestMutex || radioCommand.load() == kMp3PlayCommand ||
+      state == 1 || state == 2 || state == 3) {
+    desk_log_event(DESK_LOG_INFO,"MP3_SCAN_BUSY",state,0,"scan deferred; playlist/playback preserved");return;
+  }
   mp3ScanPending.store(true);
   mp3ScanRequested.store(true);
   updateMp3Screen();
@@ -2129,21 +2186,26 @@ static void requestMp3Scan() {
 
 static void scanMp3InBackground() {
   String tracks[kMp3MaxTracks];
-  int count = 0;
+  int count = 0,seen=0,longPaths=0;
+  const uint32_t started=millis(),scan=++mp3CatalogId;
+  bool complete=false;
+  desk_log_event(DESK_LOG_INFO,"MP3_SCAN_BEGIN",scan,kMp3MaxTracks,"/music direct files; directory entry limit=256");
   const char *status = "SD 卡未掛載";
   // Mounting and directory traversal run without holding the LVGL mutex.
   if (deskFontMountSd()) {
     File folder = SD_MMC.open("/music");
     if (!folder || !folder.isDirectory()) status = "缺少 /music 資料夾";
     else {
-      for (int seen = 0; seen < 256 && count < kMp3MaxTracks; ++seen) {
+      for (; seen < 256 && count < kMp3MaxTracks; ++seen) {
         File entry = folder.openNextFile();
         if (!entry) break;
         if (!entry.isDirectory()) {
           String path = entry.path(), lower = path;
           lower.toLowerCase();
-          if (lower.endsWith(".mp3") && path.length() < kMp3PathSize)
-            tracks[count++] = path;
+          if (lower.endsWith(".mp3")) {
+            if(path.length()<kMp3PathSize)tracks[count++]=path;
+            else ++longPaths;
+          }
         }
         entry.close();
         vTaskDelay(1);
@@ -2159,8 +2221,17 @@ static void scanMp3InBackground() {
         tracks[j] = item;
       }
       status = count ? "已找到 MP3" : "找不到 MP3";
+      complete=true;
     }
   }
+  desk_log_event(complete?(count?DESK_LOG_INFO:DESK_LOG_WARN):DESK_LOG_ERROR,
+    complete?(count?"MP3_SCAN_FOUND":"MP3_SCAN_EMPTY"):"MP3_SCAN_FAILED",scan,count,status);
+  if(count>=kMp3MaxTracks||seen>=256)
+    desk_log_event(DESK_LOG_WARN,"MP3_SCAN_LIMIT",count,seen,"scan cap reached; later entries not checked");
+  if(longPaths)desk_log_event(DESK_LOG_WARN,"MP3_PATH_SKIPPED",longPaths,kMp3PathSize-1,"path exceeds player byte limit");
+  desk_log_event(DESK_LOG_INFO,"MP3_LIST_BEGIN",scan,count,"sorted playable playlist; track numbers are 1-based");
+  for(int i=0;i<count;i++)desk_log_text(DESK_LOG_INFO,"MP3_TRACK_PATH",i+1,tracks[i].c_str());
+  desk_log_event(DESK_LOG_INFO,"MP3_LIST_END",scan,count,"");
   if (lvgl_port_lock(-1)) {
     // Only a newly inserted card needs font registration, which uses LVGL APIs.
     if (deskFontSdMounted()) deskFontInitSd();
@@ -2168,6 +2239,7 @@ static void scanMp3InBackground() {
     for (int i = 0; i < count; ++i) mp3Tracks[i] = std::move(tracks[i]);
     for (int i = count; i < mp3TrackCount; ++i) mp3Tracks[i] = "";
     mp3TrackCount = count;
+    desk_log_mp3_count(count);
     mp3SelectedTrack.store(0);
     xSemaphoreGive(mp3RequestMutex);
     mp3StorageStatus = status;
@@ -2178,6 +2250,9 @@ static void scanMp3InBackground() {
     lvgl_port_unlock();
   }
   Serial.printf("[MP3] scan tracks=%d status=%s\n", count, status);
+  char detail[112];snprintf(detail,sizeof(detail),"ms=%lu entries=%d long_paths=%d; %s",
+    (unsigned long)(millis()-started),seen,longPaths,status);
+  desk_log_event(DESK_LOG_INFO,"MP3_SCAN_END",scan,count,detail);
 }
 
 static void settingsIoTask(void *) {
@@ -2185,6 +2260,12 @@ static void settingsIoTask(void *) {
   uint32_t lastTouchReport = 0;
   for (;;) {
     if (mp3ScanRequested.exchange(false)) scanMp3InBackground();
+    if(mp3ListRequested.exchange(false)){
+      const uint32_t id=++mp3CatalogId; // This task is the sole playlist writer.
+      desk_log_event(DESK_LOG_INFO,"MP3_LIST_BEGIN",id,mp3TrackCount,"cached playlist; no rescan or playback interruption");
+      for(int i=0;i<mp3TrackCount;i++)desk_log_text(DESK_LOG_INFO,"MP3_TRACK_PATH",i+1,mp3Tracks[i].c_str());
+      desk_log_event(DESK_LOG_INFO,"MP3_LIST_END",id,mp3TrackCount,"");
+    }
     flushPendingSettings();
     const uint32_t report = pendingTouchReport.exchange(0);
     if (report) {
@@ -2247,6 +2328,7 @@ static void cycleMp3Repeat(lv_event_t *) {
   const Mp3Repeat next = mode == Mp3Repeat::Off ? Mp3Repeat::One :
                          mode == Mp3Repeat::One ? Mp3Repeat::List : Mp3Repeat::Off;
   mp3Repeat.store(next);
+  desk_log_event(DESK_LOG_INFO,"MP3_REPEAT_MODE",(int)next,0,"0=off 1=one 2=list");
   homeSetText(lv_obj_get_child(mp3RepeatButton, 0),
               next == Mp3Repeat::One ? "單曲循環" : next == Mp3Repeat::List ? "清單循環" : "不循環");
   Serial.printf("[MP3] repeat mode=%u\n", (unsigned)next);
@@ -3468,6 +3550,7 @@ void setup() {
   if (xTaskCreatePinnedToCore(networkTask, "network", 8192, nullptr, 1,
                               &networkTaskHandle, 0) != pdPASS)
     Serial.println("[NETWORK] task creation failed");
+  mp3ScanPending.store(true);mp3ScanRequested.store(true); // Inventory is logged once at boot.
   if (xTaskCreatePinnedToCore(settingsIoTask, "settings IO", 8192, nullptr, 1,
                               nullptr, 0) != pdPASS) {
     Serial.println("[SETTINGS] task creation failed");
@@ -3502,7 +3585,24 @@ void loop() {
       int testStation=0;
       int testCounty=-1;
       int testPet=-1;
-      if(sscanf(logCommand,"LOG TEST PET %d",&testPet)==1&&testPet>=0&&testPet<(int)(sizeof(kPetActions)/sizeof(kPetActions[0]))){
+      int testMp3=0;
+      if(!strcmp(logCommand,"LOG MP3 LIST")){
+        mp3ListRequested.store(true);
+      }else if(!strcmp(logCommand,"LOG TEST MP3 SCAN")){
+        desk_log_event(DESK_LOG_INFO,"SELF_TEST_MP3",0,0,"explicit USB scan");
+        if(lvgl_port_lock(10)){requestMp3Scan();lvgl_port_unlock();}
+        else desk_log_event(DESK_LOG_INFO,"MP3_SCAN_BUSY",0,0,"UI busy; retry USB command");
+      }else if(sscanf(logCommand,"LOG TEST MP3 PLAY %d",&testMp3)==1&&testMp3>=1&&testMp3<=kMp3MaxTracks){
+        desk_log_event(DESK_LOG_INFO,"SELF_TEST_MP3",1,testMp3,"explicit USB playback; settings unchanged");
+        if(lvgl_port_lock(10)){playSelectedMp3(testMp3-1);lvgl_port_unlock();}
+      }else if(!strcmp(logCommand,"LOG TEST MP3 PAUSE")||!strcmp(logCommand,"LOG TEST MP3 RESUME")){
+        const bool pause=!strcmp(logCommand,"LOG TEST MP3 PAUSE");int expected=-1;
+        desk_log_event(DESK_LOG_INFO,"SELF_TEST_MP3",pause?2:3,0,"explicit USB pause/resume");
+        if(mp3State.load()==(pause?2:3))radioCommand.compare_exchange_strong(expected,pause?kMp3PauseCommand:kMp3ResumeCommand);
+      }else if(!strcmp(logCommand,"LOG TEST MP3 STOP")){
+        desk_log_event(DESK_LOG_INFO,"SELF_TEST_MP3",4,0,"explicit USB MP3 stop");
+        int expected=-1;if(mp3State.load()!=0)radioCommand.compare_exchange_strong(expected,0);
+      }else if(sscanf(logCommand,"LOG TEST PET %d",&testPet)==1&&testPet>=0&&testPet<(int)(sizeof(kPetActions)/sizeof(kPetActions[0]))){
         setHomePetTest(testPet);
       }else if(sscanf(logCommand,"LOG TEST PLAY %d",&testStation)==1 && testStation>=1 && testStation<=kRadioStations){
         desk_log_event(DESK_LOG_INFO,"SELF_TEST_RADIO",testStation,0,"explicit USB test; settings unchanged");

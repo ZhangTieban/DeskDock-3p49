@@ -30,4 +30,26 @@ constexpr bool incompleteUtf8() {
   return incomplete[0]=='a' && incomplete[1]==0 && sizeof(complete)==10 && complete[8]!=0;
 }
 static_assert(incompleteUtf8(),"bounded messages never end with an incomplete UTF-8 character");
+constexpr bool splitLongFilename() {
+  char path[192]={};size_t size=0;
+  for(;size<100;++size)path[size]='x';
+  const char suffix[]=u8"日本語柴犬🐕.mp3";
+  for(size_t i=0;i<sizeof(suffix);++i)path[size+i]=suffix[i];
+  size+=sizeof(suffix)-1;
+  char joined[192]={},part[112]={};size_t at=0;unsigned pieces=0;
+  while(path[at]){
+    const size_t n=deskLogTextPart(part,sizeof(part),path+at);if(!n)return false;
+    for(size_t i=0;i<n;++i)joined[at+i]=part[i];at+=n;++pieces;
+  }
+  if(pieces!=2||at!=size)return false;
+  for(size_t i=0;i<=size;++i)if(path[i]!=joined[i])return false;
+  char emoji[5]={};return deskLogTextPart(emoji,sizeof(emoji),u8"🐕狗")==4;
+}
+static_assert(splitLongFilename(),"long MP3 filenames roundtrip without dropping UTF-8 bytes");
+static_assert(deskMp3BufferLow(false,true,2047,4097),"low buffer during active file consumption");
+static_assert(!deskMp3BufferLow(false,true,2048,4097),"buffer admission threshold");
+static_assert(!deskMp3BufferLow(false,true,0,4096),"normal EOF tail is not an underrun");
+static_assert(deskMp3BufferLow(true,true,16383,100000),"low-buffer recovery hysteresis");
+static_assert(!deskMp3BufferLow(true,true,16384,100000),"recovered file buffer");
+static_assert(!deskMp3BufferLow(true,false,0,100000),"paused playback is not an underrun");
 int main(){return 0;}

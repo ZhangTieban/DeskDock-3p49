@@ -30,6 +30,9 @@ struct Event {
   uint32_t seq, heap, largest, minimum, psram, buffer;
   int32_t a,b,rssi;
   uint8_t level,station,state;
+  uint8_t mp3State,mp3Track,mp3Count;
+  uint16_t mp3Progress;
+  uint32_t mp3Buffer;
   char code[28],detail[112];
 };
 QueueHandle_t queue=nullptr;
@@ -38,6 +41,8 @@ std::atomic<uint32_t> droppedTotal{0};
 std::atomic<uint32_t> buffered{0};
 std::atomic<bool> audioLow{false};
 std::atomic<int> station{0},audioState{0},rssi{0};
+std::atomic<int> mp3State{0},mp3Track{0},mp3Count{0},mp3Progress{0};
+std::atomic<uint32_t> mp3Buffer{0};
 std::atomic<uint32_t> committed{0},storageFailures{0};
 std::atomic<int> storageErrno{0};
 std::atomic<bool> writing{false};
@@ -60,6 +65,8 @@ Event makeEvent(int level,const char *code,int32_t a,int32_t b,const char *detai
   e.minimum=heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
   e.psram=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   e.station=station.load();e.state=audioState.load();e.buffer=buffered.load();e.rssi=rssi.load();
+  e.mp3State=mp3State.load();e.mp3Track=mp3Track.load();e.mp3Count=mp3Count.load();
+  e.mp3Progress=mp3Progress.load();e.mp3Buffer=mp3Buffer.load();
   snprintf(e.code,sizeof(e.code),"%s",code ? code : "UNKNOWN");
   snprintf(e.detail,sizeof(e.detail),"%s",detail ? detail : "");
   deskLogTrimUtf8(e.detail);
@@ -120,16 +127,18 @@ bool persist(const Event &e) {
     strftime(stamp,sizeof(stamp),"%Y-%m-%dT%H:%M:%S",&t);
     const size_t n=strlen(stamp);snprintf(stamp+n,sizeof(stamp)-n,".%03d+08:00",(int)(e.epoch%1000));
   }
-  char line[1152];
+  char line[1280];
   const int count=snprintf(line,sizeof(line),
     "{\"schema\":1,\"firmware\":\"" DESKDOCK_VERSION "\",\"boot\":\"%08lx\",\"seq\":%lu,\"time\":%s%s%s,\"uptime_ms\":%llu,"
     "\"level\":\"%s\",\"event\":\"%s\",\"a\":%ld,\"b\":%ld,\"detail\":\"%s\","
     "\"heap\":%lu,\"largest\":%lu,\"min_heap\":%lu,\"psram\":%lu,\"rssi\":%ld,"
-    "\"station\":%u,\"audio_state\":%u,\"buffer\":%lu}\n",
+    "\"station\":%u,\"audio_state\":%u,\"buffer\":%lu,"
+    "\"mp3_state\":%u,\"mp3_track\":%u,\"mp3_tracks\":%u,\"mp3_buffer\":%lu,\"mp3_progress\":%u}\n",
     (unsigned long)bootId,(unsigned long)e.seq,valid ? "\"" : "",valid ? stamp : "null",valid ? "\"" : "",
     (unsigned long long)e.uptime,e.level==DESK_LOG_ERROR ? "ERROR" : e.level==DESK_LOG_WARN ? "WARN" : "INFO",
     code,(long)e.a,(long)e.b,escaped,(unsigned long)e.heap,(unsigned long)e.largest,
-    (unsigned long)e.minimum,(unsigned long)e.psram,(long)e.rssi,e.station,e.state,(unsigned long)e.buffer);
+    (unsigned long)e.minimum,(unsigned long)e.psram,(long)e.rssi,e.station,e.state,(unsigned long)e.buffer,
+    e.mp3State,e.mp3Track,e.mp3Count,(unsigned long)e.mp3Buffer,e.mp3Progress);
   if (count<=0 || (size_t)count>=sizeof(line)) return false;
   if (xSemaphoreTake(deskSdMutex(),pdMS_TO_TICKS(50))!=pdTRUE) return false;
   bool okay=true;size_t done=0;
@@ -236,6 +245,18 @@ extern "C" void desk_log_event(int level,const char *code,int32_t a,int32_t b,co
   Event e=makeEvent(level,code,a,b,detail);
   if(xQueueSend(queue,&e,0)!=pdTRUE){dropped.fetch_add(1);droppedTotal.fetch_add(1);}
 }
+extern "C" void desk_log_text(int level,const char *code,int32_t id,const char *text) {
+  if(!text||!*text){desk_log_event(level,code,id,1,"");return;}
+  for(int32_t part=1;*text;++part){
+    char chunk[112];const size_t n=deskLogTextPart(chunk,sizeof(chunk),text);
+    if(!n){desk_log_event(DESK_LOG_WARN,"TEXT_ENCODING_ERROR",id,part,"invalid/truncated UTF-8 input");break;}
+    desk_log_event(level,code,id,part,chunk);text+=n;
+  }
+}
+extern "C" void desk_log_mp3(int state,int track,uint32_t fill,int progress) {
+  mp3State.store(state);mp3Track.store(track);mp3Buffer.store(fill);mp3Progress.store(progress);
+}
+extern "C" void desk_log_mp3_count(int count){mp3Count.store(count);}
 extern "C" bool desk_log_begin() {
   if(queue)return true;bootId=esp_random();
   queue=xQueueCreateWithCaps(128,sizeof(Event),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);

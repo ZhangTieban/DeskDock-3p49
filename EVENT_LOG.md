@@ -1,4 +1,4 @@
-# SD 異常事件紀錄（0.2.13，始於 0.2.11 本機測試）
+# SD 異常事件紀錄（0.2.14，始於 0.2.11 本機測試）
 
 OTA 安裝此版後，插著 FAT32 SD 卡開機，程式會自行建立 `/logs`，不需先建資料夾或開啟選項。
 開機序列埠會顯示 `[EVENTLOG] ready /logs/events-....jsonl`。原有 fonts、music、update 與設定保留。
@@ -54,3 +54,28 @@ USB 串口 115200 可輸入 `LOG STATUS` 查看目前檔名、待寫入筆數與
 電台播放時，天氣／小型行情可在緩衝與記憶體足夠時更新；遠端資料的 NVS 快取寫入延到電台停止後，避免 Flash erase/GC 卡住音訊與 UI。城市／Wi-Fi 等使用者設定仍沿用原本儲存流程。
 單筆文字說明採有界 UTF-8（最多 111 bytes），超長 SDK 訊息截斷；事件碼、數值狀態與記憶體快照獨立保留，panic 的完整資料另由有效 Flash coredump 保存。
 配置失敗回呼只做計數，避免在記憶體已不足時再次配置；`ALLOC_FAILED` 約每秒彙總一次，a=最後一筆要求的位元組數、b=這段期間的失敗次數。
+
+## MP3 清單與播放紀錄（0.2.14）
+
+開機自動掃描一次 `/music` 第一層，之後沿用原本 MP3 畫面的重新掃描。播放器仍最多收錄 32 首、檢查 256 個目錄項目，不遞迴子資料夾；超過 191 bytes 的完整路徑仍略過。LOG 的曲數是這次收錄的可播放清單，不能把達到上限時的數字當成整張 SD 的歌曲總數。
+
+| 事件 | 參數／用途 |
+|---|---|
+| MP3_SCAN_BEGIN / MP3_SCAN_END | a=掃描識別碼；END 的 b=收錄曲數，detail 含耗時、已檢查項目及長路徑略過數 |
+| MP3_SCAN_FOUND / MP3_SCAN_EMPTY / MP3_SCAN_FAILED | 找到歌曲、清單為空、SD 或 /music 不可用；a=掃描識別碼、b=曲數 |
+| MP3_SCAN_LIMIT / MP3_PATH_SKIPPED | 達到既有掃描限制、路徑過長略過；不宣稱後續檔案已掃完 |
+| MP3_LIST_BEGIN / MP3_LIST_END | a=清單識別碼、b=收錄曲數；兩者之間為依播放器順序列出的曲目 |
+| MP3_TRACK_PATH | a=曲目編號（從1開始）、b=文字片段編號（從1開始），detail=完整路徑的片段 |
+| MP3_OPEN_BEGIN / MP3_PLAY_PATH / MP3_PLAYING | 開啟前、播放路徑及啟播成功；路徑分段方式同 TRACK_PATH，PLAYING 含檔案大小與循環模式 |
+| MP3_PAUSED / MP3_RESUMED / MP3_STOP / MP3_CLOSED | 暫停、續播、停止／換來源及資源釋放；附上各階段記憶體快照 |
+| MP3_EOF / MP3_CANCELLED / MP3_DECODE_FAILED | 自然結束、新命令取消、非預期中斷；detail 含位元組位置、大小、SD/codec/decoder 狀態 |
+| MP3_OPEN_FAILED / MP3_PAUSE_FAILED / MP3_RESUME_FAILED | 開檔、解碼、I2S 或暫停／續播轉換失敗；新命令取消開啟另記 INFO 的 MP3_OPEN_CANCELLED |
+| MP3_BUFFER_LOW / MP3_BUFFER_RECOVERED | 檔案尚有資料時緩衝不足／恢復；排除正常檔尾與暫停狀態 |
+| MP3_STATUS | 播放或暫停期間每30秒一筆；a=曲目編號、b=音訊工作最低剩餘堆疊 bytes，detail 含位置、大小、循環模式 |
+| MP3_REPEAT_MODE | a=0不循環、1單曲、2清單 |
+
+長中文／日文檔名不直接截斷，使用多筆 PATH 事件保存。將同一清單與同一曲目依 b 排序後串接 detail，即為完整檔名／路徑。一般事件與 SDK 的文字長度限制維持不變。
+
+每筆 JSON 額外包含 `mp3_state`（0停止、1開啟中、2播放、3暫停、4失敗、5結束）、`mp3_track`（1起算，0無曲目）、`mp3_tracks`（清單總數）、`mp3_buffer`（位元組）與 `mp3_progress`（0–1000，依檔案位元組比例，非秒數）。原有 heap、largest、min_heap、psram 欄位繼續保留，CSV 匯出也會帶出新欄位；舊檔缺少的新欄位留白。
+
+USB `LOG MP3 LIST` 會把目前快取清單寫入 SD LOG，不重新掃描或中斷播放。明確測試指令：`LOG TEST MP3 SCAN`、`LOG TEST MP3 PLAY 1`、`LOG TEST MP3 PAUSE`、`LOG TEST MP3 RESUME`、`LOG TEST MP3 STOP`；測試會留下 SELF_TEST_MP3 標記。播放中不接受重新掃描，保留既有保護。

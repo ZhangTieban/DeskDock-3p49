@@ -13,7 +13,9 @@ Get-ChildItem -LiteralPath $LogDirectory -Filter '*.jsonl' -File | Sort-Object N
       [pscustomobject]@{file=$source;line=$number;firmware=$row.firmware;time=$row.time;boot=$row.boot;uptime_ms=$row.uptime_ms;
         seq=$row.seq;level=$row.level;event=$row.event;a=$row.a;b=$row.b;detail=$row.detail;
         heap=$row.heap;largest=$row.largest;min_heap=$row.min_heap;psram=$row.psram;rssi=$row.rssi;
-        station=$row.station;audio_state=$row.audio_state;buffer=$row.buffer}
+        station=$row.station;audio_state=$row.audio_state;buffer=$row.buffer;
+        mp3_state=$row.mp3_state;mp3_track=$row.mp3_track;mp3_tracks=$row.mp3_tracks;
+        mp3_buffer=$row.mp3_buffer;mp3_progress=$row.mp3_progress}
     } catch {$bad++;Write-Warning ('Invalid/incomplete JSON at {0}:{1}; original file preserved' -f $source,$number)}
   }
 } | Export-Csv -LiteralPath $OutCsv -NoTypeInformation -Encoding $encoding

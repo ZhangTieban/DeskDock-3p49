@@ -18,6 +18,16 @@ constexpr void deskLogTrimUtf8(char *text) {
   const size_t bytes=c>=0xf0 ? 4 : c>=0xe0 ? 3 : c>=0xc0 ? 2 : 1;
   if(length-lead<bytes)text[lead]=0;
 }
+// Return bytes consumed, keeping each part independently valid UTF-8.
+constexpr size_t deskLogTextPart(char *out,size_t capacity,const char *text) {
+  if(!capacity)return 0;
+  size_t n=0;while(text&&text[n]&&n+1<capacity){out[n]=text[n];++n;}
+  out[n]=0;deskLogTrimUtf8(out);
+  n=0;while(out[n])++n;return n;
+}
+constexpr bool deskMp3BufferLow(bool wasLow,bool playing,uint32_t buffered,uint32_t remaining) {
+  return playing&&remaining>4096&&buffered<(wasLow?16384U:2048U);
+}
 constexpr size_t deskLogEscape(char *out, size_t capacity, const char *text) {
   size_t n=0;
   if (!capacity) return 0;
