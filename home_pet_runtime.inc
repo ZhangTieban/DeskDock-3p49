@@ -116,6 +116,11 @@ static void animateHomeDog(lv_timer_t *timer) {
     const uint32_t withinSecond=std::min<uint32_t>(999,(uint32_t)(millis()-homePetClockAt));
     frameIndex=std::min((elapsed*1000+withinSecond)/kPetTickMs,(uint32_t)kPetFrameCounts[index]-1);
   }
+  if(!testing&&period&&(action==PetAction::VisitArrive||action==PetAction::VisitLeave)){
+    const uint32_t phaseSeconds=action==PetAction::VisitLeave?elapsed-7176:elapsed;
+    const uint32_t withinSecond=std::min<uint32_t>(999,(uint32_t)(millis()-homePetClockAt));
+    frameIndex=std::min((phaseSeconds*1000+withinSecond)/kPetTickMs,(uint32_t)kPetFrameCounts[index]-1);
+  }
   const PetFrame &frame = kPetActions[index][frameIndex];
   const uint32_t touch = homePetTouch.load();
   if (touch != lastTouch) { lastTouch = touch; heartUntil = tick + 30; }

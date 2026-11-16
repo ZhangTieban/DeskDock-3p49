@@ -85,7 +85,7 @@ USB 串口 115200 可輸入 `LOG STATUS` 查看目前檔名、待寫入筆數與
 | mp3_elapsed_ms | 已成功提交 I2S 的 PCM 音訊毫秒，非開檔後經過時間；不含暫停、等資料或收尾靜音，與實際喇叭間可能差 DMA 佇列延遲 |
 | mp3_duration_ms / mp3_remaining_ms | 曲長／剩餘毫秒；無可靠曲長時為 null，畫面顯示 --:-- |
 | mp3_duration_estimated | true=CBR 依檔案大小／位元率估算（畫面「約」）；false=Xing/Info/VBRI 宣告取樣長度或自然結束後的實際長度；不保證宣告標頭一定正確 |
-| cpu0_permille / cpu1_permille | 0–1000，除以10即各核心百分比；根據 ESP-IDF 啟用的 idle runtime counter 差值，每約1秒取樣；-1=尚無樣本，包含系統工作及中斷負載的近似值 |
+| cpu0_permille / cpu1_permille | 0–1000，除以10即各核心百分比；根據 ESP-IDF 啟用的 idle runtime counter 差值，每約1秒取樣；-1=尚無樣本，為工作排程負載近似值，無法精確拆分中斷時間 |
 | battery_mv | 沿用板上 ADC 分壓量測的電池毫伏，每15秒更新；0=尚未量測，非獨立校準電表 |
 | net_rx_Bps | 最近取樣窗內的應用下載 bytes/s，含 ICY 音訊（不含 ICY metadata）、HLS HTTP payload、天氣／金融／OTA 回應；不是 Wi-Fi 連線速率或網路最大頻寬，沒有下載可為0 |
 | net_rx_bytes | 開機後已計量下載 bytes 累計，uint32 約4GiB繞回；不含 TCP/TLS/MAC 標頭、DNS、NTP 或上傳 |

@@ -13,9 +13,12 @@ def encode(rows):
 
 
 def build_visit(sprites):
-    # Blue dress, lighter hair and a dark Shiba distinguish the visiting pair.
+    # Blue dress and a slightly larger orange Shiba distinguish the visiting pair.
     def girl(index): return [row.translate(str.maketrans({'C':'7','A':'3'})) for row in sprites[index]]
-    def dog(index): return [row.translate(str.maketrans({'1':'A','4':'3','5':'4'})) for row in sprites[index]]
+    def dog(index):
+        rows=sprites[index]
+        return [''.join(rows[min(20,int((y+.5)*21/24))][min(31,int((x+.5)*32/36))]
+                        for x in range(36)) for y in range(24)]
     images=[];lookup={};clips=[]
     for action in ('arrive','play','rest','leave'):
         seq=[]
@@ -40,7 +43,7 @@ def build_visit(sprites):
                     walking=tick>=240;gf=False
                 gp=10+(tick//3)%4 if walking else 9
                 bp=(tick//3)%4 if walking else 7;bf=gf
-                lead(gy+(3 if gf else 15),16,bx+(8 if bf else 24),21)
+                lead(gy+(3 if gf else 15),16,bx+(9 if bf else 27),20)
             elif action=='play':
                 if tick<160:
                     phase=tick/160*math.tau;delta=round(34*math.sin(phase))
@@ -55,7 +58,7 @@ def build_visit(sprites):
                 ap=7;bp=7
             draw(sprites[9],44)
             draw(girl(gp),gy,flip=(gf if action in ('arrive','leave') else True))
-            draw(sprites[ap],ax,11,af);draw(dog(bp),bx,11,bf)
+            draw(sprites[ap],ax,11,af);draw(dog(bp),bx,8,bf)
             occupied=[(x,y) for y,row in enumerate(frame) for x,c in enumerate(row) if c!='.']
             x0=min(x for x,y in occupied);x1=max(x for x,y in occupied)
             y0=min(y for x,y in occupied);y1=max(y for x,y in occupied)
