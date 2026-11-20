@@ -10,6 +10,9 @@
 // One producer owns the network; the decoder reads from a PSRAM SPSC ring.
 class BestRadioHlsSource final : public AudioFileSource {
  public:
+  static constexpr size_t kStartBytes = 64 * 1024;
+  static constexpr size_t kBackgroundHttpBytes = 192 * 1024;
+
   BestRadioHlsSource() = default;
   ~BestRadioHlsSource() override;
   bool begin(uint8_t channel, SemaphoreHandle_t httpMutex, const std::atomic<int> *command=nullptr);
@@ -24,7 +27,8 @@ class BestRadioHlsSource final : public AudioFileSource {
   bool failed() const { return failed_.load(); }
 
  private:
-  static constexpr size_t kRingBytes = 256 * 1024;
+  static constexpr size_t kRingBytes = 512 * 1024;
+  static constexpr size_t kRefillBytes = 320 * 1024;
   static constexpr size_t kTextBytes = 32 * 1024;
   static void taskEntry(void *arg);
   void run();
@@ -32,7 +36,7 @@ class BestRadioHlsSource final : public AudioFileSource {
   bool loadMediaPlaylist(String &media);
   bool nextSegment(const String &media, String &segment, uint32_t &sequence);
   bool downloadSegment(const String &segment);
-  bool fetchText(const String &url, size_t limit);
+  bool fetchText(const String &url, size_t limit, const char *stage);
   bool push(const uint8_t *data, size_t len);
   bool processPacket(const uint8_t *packet);
   static String resolveUrl(const String &base, const String &relative);

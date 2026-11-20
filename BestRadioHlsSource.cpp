@@ -7,6 +7,7 @@
 #include <freertos/task.h>
 #include <time.h>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace {
@@ -106,9 +107,10 @@ bool BestRadioHlsSource::push(const uint8_t *data, size_t len) {
   return !stop_.load();
 }
 
-bool BestRadioHlsSource::fetchText(const String &url, size_t limit) {
+bool BestRadioHlsSource::fetchText(const String &url, size_t limit, const char *stage) {
   if (!text_ || limit > kTextBytes) return false;
   for (int attempt = 0; attempt < 2 && !stop_.load(); ++attempt) {
+    const uint32_t queued = millis();
     while (xSemaphoreTake(httpMutex_, pdMS_TO_TICKS(100)) != pdTRUE)
       if (stop_.load()) return false;
     if (stop_.load()) { xSemaphoreGive(httpMutex_); return false; }
@@ -120,18 +122,30 @@ bool BestRadioHlsSource::fetchText(const String &url, size_t limit) {
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.event_handler = receiveText;
     cfg.user_data = &sink;
-    cfg.timeout_ms = 6000;
+    // Retry a stalled lookup sooner, but retain the longer fallback for slow hosts.
+    cfg.timeout_ms = attempt == 0 ? 4000 : 6000;
     cfg.buffer_size = 2048;
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) { xSemaphoreGive(httpMutex_); return false; }
     const uint32_t started=millis();
     const esp_err_t result = esp_http_client_perform(client);
+    const uint32_t elapsed = millis() - started;
     lastHttpStatus_ = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
     xSemaphoreGive(httpMutex_);
-    if(result!=ESP_OK || lastHttpStatus_!=200)
-      desk_log_event(DESK_LOG_WARN,"HLS_PLAYLIST_ERROR",result,lastHttpStatus_,"playlist / station lookup");
-    else if(millis()-started>=2500)desk_log_event(DESK_LOG_WARN,"HLS_PLAYLIST_SLOW",millis()-started,sink.size,"");
+    const bool httpError = result != ESP_OK || lastHttpStatus_ != 200;
+    if (httpError || elapsed >= 2500 || started - queued >= 1000) {
+      char detail[96];
+      snprintf(detail, sizeof(detail), "%s try=%d http_ms=%lu gate_ms=%lu fill=%u", stage,
+               attempt + 1, (unsigned long)elapsed, (unsigned long)(started - queued),
+               (unsigned)buffered());
+      if (httpError)
+        desk_log_event(DESK_LOG_WARN, "HLS_PLAYLIST_ERROR", result, lastHttpStatus_, detail);
+      else if (elapsed >= 2500)
+        desk_log_event(DESK_LOG_WARN, "HLS_PLAYLIST_SLOW", elapsed, sink.size, detail);
+      else
+        desk_log_event(DESK_LOG_INFO, "HLS_HTTP_WAIT", started - queued, elapsed, detail);
+    }
     if (result == ESP_OK && lastHttpStatus_ == 200 && !sink.overflow && sink.size) return true;
     Serial.printf("[HLS] playlist failed attempt=%d error=%s http=%d overflow=%d\n",
                   attempt + 1, esp_err_to_name(result), lastHttpStatus_, sink.overflow);
@@ -158,7 +172,7 @@ String BestRadioHlsSource::resolveUrl(const String &base, const String &relative
 }
 
 bool BestRadioHlsSource::resolveStation(String &master) {
-  if (!fetchText("http://www.bestradio.com.tw/link.aspx", kTextBytes)) return false;
+  if (!fetchText("http://www.bestradio.com.tw/link.aspx", kTextBytes, "station")) return false;
   const String needle = String("https://bestradiow-hichannel.cdn.hinet.net/live/") +
                         kChannelIds[channel_] + "/playlist.m3u8";
   const char *begin = strstr(text_, needle.c_str());
@@ -179,7 +193,7 @@ bool BestRadioHlsSource::resolveStation(String &master) {
 }
 
 bool BestRadioHlsSource::loadMediaPlaylist(String &media) {
-  if (!fetchText(media, 4096)) return false;
+  if (!fetchText(media, 4096, "master")) return false;
   if (!strstr(text_, "#EXT-X-STREAM-INF")) return true;
   for (char *p = text_; p && *p;) {
     char *end = strchr(p, '\n');
@@ -197,7 +211,7 @@ bool BestRadioHlsSource::loadMediaPlaylist(String &media) {
 }
 
 bool BestRadioHlsSource::nextSegment(const String &media, String &segment, uint32_t &sequence) {
-  if (!fetchText(media, 4096)) return false;
+  if (!fetchText(media, 4096, "media")) return false;
   uint32_t base = 0;
   uint32_t index = 0;
   for (char *p = text_; p && *p;) {
@@ -321,9 +335,9 @@ void BestRadioHlsSource::run() {
   if (!resolveStation(master)) errors = 5;
   else { media = master; if (!loadMediaPlaylist(media)) errors = 5; }
   while (!stop_.load() && errors < 5) {
-    // Wait without owning a TLS client or the shared HTTP gate. Leave room for
-    // the next segment so a full audio ring does not pin scarce internal RAM.
-    while (buffered() > 65536 && !stop_.load()) vTaskDelay(pdMS_TO_TICKS(10));
+    // Start the next lookup before the reserve gets low. Keep 192 KiB free
+    // for the next AAC segment before taking the shared HTTP gate.
+    while (buffered() > kRefillBytes && !stop_.load()) vTaskDelay(pdMS_TO_TICKS(10));
     if (stop_.load()) break;
     const time_t now = time(nullptr);
     if (expires_ && now > 1700000000 && static_cast<uint32_t>(now + 120) >= expires_) {

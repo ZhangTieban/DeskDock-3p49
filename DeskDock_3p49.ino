@@ -198,6 +198,9 @@ static constexpr uint32_t kFetchWeather = 1;
 static constexpr uint32_t kFetchMarkets = 2;
 static constexpr uint32_t kFetchIntraday = 4;
 static constexpr uint32_t kProbeWeather = 8; // Explicit USB self-test; no settings/cache writes.
+static constexpr uint32_t kResumeWeather = 16;
+static constexpr uint32_t kFetchWeatherSlot = 32;
+static constexpr uint32_t kWeatherRequests = kFetchWeather | kResumeWeather | kFetchWeatherSlot;
 static std::atomic<int> probeWeatherCounty{-1};
 static String stockCodes[kMaxStocks];
 static String stockValues[kMaxStocks];
@@ -1284,14 +1287,14 @@ static void radioAudioTask(void *) {
                             (unsigned)buffer->getFillLevel());
             } else if (hls) {
               const uint32_t start = millis();
-              while (hls->buffered() < 32768 && !hls->failed() &&
+              while (hls->buffered() < BestRadioHlsSource::kStartBytes && !hls->failed() &&
                      (uint32_t)(millis() - start) < 45000 &&
                      WiFi.status() == WL_CONNECTED && radioCommand.load() == -1)
                 vTaskDelay(pdMS_TO_TICKS(10));
               Serial.printf("[HLS] prebuffer=%u bytes\n", (unsigned)hls->buffered());
             }
             AudioFileSource *audioSource = hls ? source : static_cast<AudioFileSource *>(buffer);
-            const bool prebuffered = hls ? hls->buffered() >= 32768 :
+            const bool prebuffered = hls ? hls->buffered() >= BestRadioHlsSource::kStartBytes :
                                       buffer && buffer->getFillLevel() >= 65536;
             if (prebuffered && !radioLinkLost.load() && radioCommand.load() == -1) {
               output = new RadioI2SOutput();
@@ -2042,7 +2045,7 @@ static void setWeatherCounty(uint8_t slot, int county) {
   lastWeatherFlip = millis();
   deferSetting(4 + slot, cfg.counties[slot]);
   lastWeatherAttempt = millis();
-  if (networkTaskHandle) xTaskNotify(networkTaskHandle, kFetchWeather, eSetBits);
+  if (networkTaskHandle) xTaskNotify(networkTaskHandle, kFetchWeatherSlot, eSetBits);
   lastInputMs = millis();
 }
 static void closeWeatherCities(lv_event_t *) {
@@ -2705,7 +2708,7 @@ static bool takeBackgroundHttpMutex() {
   const uint32_t started=millis();
   while (millis()-started<1000 && WiFi.status()==WL_CONNECTED) {
     const int state=radioState.load(),command=radioCommand.load();
-    const uint32_t cushion=radioStation.load()>=6 ? 131072 : 65536;
+    const uint32_t cushion = radioStation.load() >= 6 ? BestRadioHlsSource::kBackgroundHttpBytes : 65536;
     const bool ready=deskBackgroundHttpReady(state==2,
         state==1 || (command>0 && command<=kRadioStations),desk_log_buffered(),
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
@@ -3223,13 +3226,14 @@ static bool fetchNight(RemoteData &remote) {
 
 static void networkTask(void *) {
   backgroundTlsOwner.store(xTaskGetCurrentTaskHandle());
+  uint32_t pendingWeatherSlots = 0;
   for (;;) {
     uint32_t requests = 0;
     xTaskNotifyWait(0, UINT32_MAX, &requests, portMAX_DELAY);
     if (WiFi.status() != WL_CONNECTED) continue;
     uint32_t retryRequests=0;
     backgroundRetryRequests=0;
-    if((requests&kFetchWeather) && (requests&kFetchIntraday))retryRequests|=kFetchIntraday;
+    if((requests&kWeatherRequests) && (requests&kFetchIntraday))retryRequests|=kFetchIntraday;
     backgroundHttpDeferred=false;
     Serial.printf("[NETWORK] start heap=%u largest=%u min=%u psram=%u task_stack=%u\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -3248,7 +3252,7 @@ static void networkTask(void *) {
           "SELF_TEST_WEATHER_RESULT",county,valid,kCounties[county]);
       }
     }
-    if ((requests & kFetchIntraday) && !(requests & kFetchWeather)) {
+    if ((requests & kFetchIntraday) && !(requests & kWeatherRequests)) {
       activeHttpRequest=kFetchIntraday;
       String codes[kMaxStocks];
       uint8_t count;
@@ -3277,25 +3281,31 @@ static void networkTask(void *) {
       }
     }
 
-    if (requests & kFetchWeather) {
+    if (requests & kWeatherRequests) {
       activeHttpRequest=kFetchWeather;
-      const int priority=weatherPrioritySlot.exchange(-1);
+      if (requests & kFetchWeather) pendingWeatherSlots = (1u << kWeatherSlots) - 1u;
+      const int priority = weatherPrioritySlot.exchange(-1);
+      if (priority >= 0 && priority < kWeatherSlots) pendingWeatherSlots |= 1u << priority;
       for (int order=-1; order<kWeatherSlots && WiFi.status()==WL_CONNECTED; ++order) {
         const int slot=order<0 ? priority : order;
-        if(slot<0 || slot>=kWeatherSlots || (order>=0 && slot==priority)) continue;
+        if (slot < 0 || slot >= kWeatherSlots || (order >= 0 && slot == priority)) continue;
+        const uint32_t slotBit = 1u << slot;
+        if (!(pendingWeatherSlots & slotBit)) continue;
         while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
-        if (slot>=cfg.weatherCount) { lvgl_port_unlock(); continue; }
+        if (slot>=cfg.weatherCount) {
+          lvgl_port_unlock();
+          pendingWeatherSlots &= ~slotBit;
+          continue;
+        }
         const int county = cfg.counties[slot];
         lvgl_port_unlock();
         WeatherData result;
         backgroundHttpDeferred=false;
         const bool valid = fetchWeather(result, county);
-        if(backgroundHttpDeferred){
-          retryRequests|=kFetchWeather;
-          int expected=-1;
-          weatherPrioritySlot.compare_exchange_strong(expected,slot);
-          break;
-        }
+        if (backgroundHttpDeferred) break;
+        // A completed attempt, including an HTTP failure, waits for the next
+        // normal refresh. Resource deferral keeps only the unprocessed slots.
+        pendingWeatherSlots &= ~slotBit;
         while (!lvgl_port_lock(1000)) vTaskDelay(pdMS_TO_TICKS(10));
         const bool current = slot<cfg.weatherCount && cfg.counties[slot] == county;
         if (current && (valid || weatherData[slot].stamp.isEmpty())) {
@@ -3319,8 +3329,9 @@ static void networkTask(void *) {
           prefs.putString(stampKey.c_str(), result.stamp);
           xSemaphoreGive(configMutex);
         }
-        if(weatherPrioritySlot.load()>=0){retryRequests|=kFetchWeather;break;}
+        if (weatherPrioritySlot.load() >= 0) break;
       }
+      if (pendingWeatherSlots) retryRequests |= kResumeWeather;
     }
 
     if (requests & kFetchMarkets) {
@@ -3416,7 +3427,7 @@ static void networkTask(void *) {
                   (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                   (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-    retryRequests|=backgroundRetryRequests;
+    retryRequests |= backgroundRetryRequests & ~kFetchWeather;
     if(retryRequests && WiFi.status()==WL_CONNECTED){
       vTaskDelay(pdMS_TO_TICKS(500));
       xTaskNotify(networkTaskHandle,retryRequests,eSetBits);
@@ -3683,7 +3694,7 @@ void loop() {
       }else if(!strcmp(logCommand,"LOG TEST WEATHER")){
         desk_log_event(DESK_LOG_INFO,"SELF_TEST_WEATHER",0,0,"refresh existing counties; settings unchanged");
         if(lvgl_port_lock(10)){weatherPrioritySlot.store(weatherSlot);lvgl_port_unlock();}
-        if(networkTaskHandle)xTaskNotify(networkTaskHandle,kFetchWeather,eSetBits);
+        if(networkTaskHandle)xTaskNotify(networkTaskHandle,kFetchWeatherSlot,eSetBits);
       }else if(!strcmp(logCommand,"LOG TEST UI")){
         // Run one step per loop interval; never hold the LVGL lock while waiting.
         desk_log_event(DESK_LOG_INFO,"SELF_TEST_UI",10,0,"explicit USB home weather/radio switches");
