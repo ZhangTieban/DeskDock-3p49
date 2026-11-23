@@ -15,7 +15,7 @@ void desk_log_battery(int millivolts);
 void desk_log_net_rx(uint32_t bytes);
 void desk_log_audio(int station, int state, uint32_t buffered);
 uint32_t desk_log_buffered(void);
-void desk_log_ui(uint32_t handler_us, uint32_t render_us);
+void desk_log_ui(uint32_t handler_us, uint32_t render_us, uint32_t flush_us, uint32_t lock_us);
 void desk_log_async_http(bool active);
 bool desk_log_flush(uint32_t timeout_ms);
 void desk_log_serial_command(const char *command);

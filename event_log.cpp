@@ -327,8 +327,12 @@ extern "C" void desk_log_async_http(bool active){
   if(active)asyncHttpOwner.store(self);
   else {TaskHandle_t expected=self;asyncHttpOwner.compare_exchange_strong(expected,nullptr);}
 }
-extern "C" void desk_log_ui(uint32_t handler,uint32_t render){
-  if(handler>=100000)desk_log_event(DESK_LOG_WARN,"UI_SLOW",handler,render,"handler_us / render_us; timestamp is handler completion");
+extern "C" void desk_log_ui(uint32_t handler, uint32_t render, uint32_t flush, uint32_t lock) {
+  if (handler < 100000 && lock < 100000) return;
+  char detail[96];
+  snprintf(detail, sizeof(detail), "a=handler_us b=render_us flush_wait_us=%lu lock_wait_us=%lu",
+           (unsigned long)flush, (unsigned long)lock);
+  desk_log_event(DESK_LOG_WARN, "UI_SLOW", handler, render, detail);
 }
 extern "C" bool desk_log_flush(uint32_t timeout){
   const uint32_t start=millis();

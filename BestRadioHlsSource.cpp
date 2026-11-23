@@ -300,7 +300,15 @@ bool BestRadioHlsSource::downloadSegment(const String &segment) {
   }
   uint8_t packet[188];
   size_t packetCount = 0;
+  bool lowBufferDeadline = false;
   while (okay && !stop_.load()) {
+    // A full ring can legitimately throttle a large segment. Only abandon
+    // an overdue transfer when playback is about to run out of audio.
+    if (millis() - started >= 30000 && buffered() < 32 * 1024) {
+      lowBufferDeadline = true;
+      okay = false;
+      break;
+    }
     size_t got = 0;
     while (got < sizeof(packet) && !stop_.load()) {
       const int n = esp_http_client_read(client, reinterpret_cast<char *>(packet) + got,
@@ -318,7 +326,10 @@ bool BestRadioHlsSource::downloadSegment(const String &segment) {
   esp_http_client_cleanup(client);
   xSemaphoreGive(httpMutex_);
   const uint32_t elapsed=millis()-started;
-  if(!stop_.load() && (!okay || !complete))desk_log_event(DESK_LOG_WARN,"HLS_SEGMENT_ERROR",lastHttpStatus_,elapsed,"");
+  if(!stop_.load() && (!okay || !complete))
+    desk_log_event(DESK_LOG_WARN,"HLS_SEGMENT_ERROR",lastHttpStatus_,elapsed,
+                   lowBufferDeadline ? "overdue transfer with low audio buffer" :
+                   !complete ? "incomplete response" : "packet processing failed");
   else if(!stop_.load() && elapsed>=2000 && packetCount*188ULL*1000<32768ULL*elapsed)
     desk_log_event(DESK_LOG_WARN,"NETWORK_SLOW",elapsed,packetCount*188,"HLS bytes / elapsed_ms; below 32KiB/s");
   return okay && complete && packetCount && audioPid_ != 0xffff;

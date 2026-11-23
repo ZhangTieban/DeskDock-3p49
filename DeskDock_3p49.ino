@@ -65,7 +65,7 @@ static constexpr int kMaxWifiEntries = 14;
 static constexpr int kMaxStocks = 10;
 
 static constexpr int kRadioStations = 9;
-static constexpr size_t kRadioBufferBytes = 256 * 1024;
+static constexpr size_t kRadioBufferBytes = 384 * 1024;
 static const char *kRadioNames[kRadioStations] = {
   "Groove Salad", "Space Station", "自訂電台", "UFO 92.1", "BCC 103.3",
   "好事989", "好事903", "港都983", "好事935"

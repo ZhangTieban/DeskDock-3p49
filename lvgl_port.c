@@ -34,6 +34,7 @@ static lv_draw_buf_t display_buffers[2];
 static TaskHandle_t lvgl_task_handle;
 static int64_t render_started;
 static uint32_t render_last_us;
+static uint32_t flush_wait_us;
 static void report_render(lv_event_t *event) {
   if(lv_event_get_code(event)==LV_EVENT_RENDER_START)render_started=esp_timer_get_time();
   else if(render_started)render_last_us=(uint32_t)(esp_timer_get_time()-render_started);
@@ -152,7 +153,9 @@ static void display_flush_wait(lv_display_t *disp)
 {
   // LVGL calls this once before reusing a frame. Sleep instead of spinning
   // while the display worker finishes; LVGL clears its flushing flag itself.
+  const int64_t started = esp_timer_get_time();
   xSemaphoreTake(frame_done_semaphore, portMAX_DELAY);
+  flush_wait_us += (uint32_t)(esp_timer_get_time() - started);
 }
 
 static void example_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *color_p)
@@ -278,12 +281,15 @@ void example_lvgl_port_task(void *arg)
   uint32_t task_delay_ms = LVGL_TASK_MAX_DELAY_MS;
   for(;;)
   {
+    const int64_t lock_started = esp_timer_get_time();
     if (lvgl_port_lock(-1)) 
     {
       const int64_t handler_started = esp_timer_get_time();
+      flush_wait_us = 0;
       task_delay_ms = lv_timer_handler();
       desk_ui_report((uint32_t)(esp_timer_get_time() - handler_started));
-      desk_log_ui((uint32_t)(esp_timer_get_time()-handler_started),render_last_us);
+      desk_log_ui((uint32_t)(esp_timer_get_time()-handler_started), render_last_us,
+                  flush_wait_us, (uint32_t)(handler_started - lock_started));
       render_last_us=0;
       //Release the mutex
       lvgl_port_unlock();
