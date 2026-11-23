@@ -21,6 +21,7 @@ extern void desk_touch_activity(void);
 extern void desk_touch_report(int x, int y);
 extern void desk_display_report(uint32_t rotate_us, uint32_t transfer_us);
 extern void desk_ui_report(uint32_t handler_us);
+extern uint32_t desk_font_sd_io_us(void);
 
 static const char *TAG = "lvgl_port";
 static SemaphoreHandle_t lvgl_mux = NULL;
@@ -285,11 +286,13 @@ void example_lvgl_port_task(void *arg)
     if (lvgl_port_lock(-1)) 
     {
       const int64_t handler_started = esp_timer_get_time();
+      const uint32_t font_io_started = desk_font_sd_io_us();
       flush_wait_us = 0;
       task_delay_ms = lv_timer_handler();
       desk_ui_report((uint32_t)(esp_timer_get_time() - handler_started));
       desk_log_ui((uint32_t)(esp_timer_get_time()-handler_started), render_last_us,
-                  flush_wait_us, (uint32_t)(handler_started - lock_started));
+                  flush_wait_us, (uint32_t)(handler_started - lock_started),
+                  desk_font_sd_io_us() - font_io_started);
       render_last_us=0;
       //Release the mutex
       lvgl_port_unlock();

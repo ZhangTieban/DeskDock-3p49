@@ -3488,13 +3488,20 @@ static void refreshUi() {
   char percentage[8];
   if(hasBattery)snprintf(percentage,sizeof(percentage),"%d%%",batteryPct);
   else strcpy(percentage,"--%");
-  homeSetText(batteryPercentLabel,percentage);
-  lv_obj_update_layout(wifiLabel);lv_obj_update_layout(batteryPercentLabel);
-  lv_obj_align_to(batteryPercentLabel,wifiLabel,LV_ALIGN_OUT_RIGHT_MID,2,0);
+  static bool powerLayoutReady = false;
+  const bool powerLayoutChanged =
+      !powerLayoutReady || strcmp(lv_label_get_text(batteryPercentLabel), percentage) != 0;
+  if (powerLayoutChanged) {
+    homeSetText(batteryPercentLabel, percentage);
+    lv_obj_align_to(batteryPercentLabel, wifiLabel, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
+    powerLayoutReady = true;
+  }
   const bool usbConnected=usb_serial_jtag_is_connected(); // Host SOF, not VBUS/charging detection.
-  if(homeUsbIcon){
-    lv_obj_align_to(homeUsbIcon,batteryPercentLabel,LV_ALIGN_OUT_RIGHT_MID,2,0);
-    homeVisible(homeUsbIcon,usbConnected);
+  if (homeUsbIcon) {
+    const bool wasHidden = lv_obj_has_flag(homeUsbIcon, LV_OBJ_FLAG_HIDDEN);
+    homeVisible(homeUsbIcon, usbConnected);
+    if (usbConnected && (powerLayoutChanged || wasHidden))
+      lv_obj_align_to(homeUsbIcon, batteryPercentLabel, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
   }
   refreshHomeOccasion(timeReady ? &t : nullptr);
   static bool wifiColorReady = false, wifiColorConnected = false;

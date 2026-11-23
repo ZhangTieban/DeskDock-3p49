@@ -125,9 +125,12 @@ static void animateHomeDog(lv_timer_t *timer) {
   const uint32_t touch = homePetTouch.load();
   if (touch != lastTouch) { lastTouch = touch; heartUntil = tick + 30; }
   const bool heart = tick < heartUntil;
+  const int heartY = heart ? 4 + (tick / 5) % 2 : -1;
   static PetFrame rendered = {};
-  static bool hasRendered = false, hadHeart = false;
-  const bool changed = !hasRendered || memcmp(&rendered, &frame, sizeof(frame)) != 0 || heart || hadHeart;
+  static bool hasRendered = false;
+  static int renderedHeartY = -1;
+  const bool changed = !hasRendered || memcmp(&rendered, &frame, sizeof(frame)) != 0 ||
+                       heartY != renderedHeartY;
   if (changed) {
     lv_draw_buf_t *buffer = lv_canvas_get_draw_buf(canvas);
     const uint32_t bg = kHomeBackground;
@@ -142,9 +145,9 @@ static void animateHomeDog(lv_timer_t *timer) {
     drawPetSprite(buffer, frame.girlPose + 9, frame.girlX, 0, frame.girlFlip);
     drawPetSprite(buffer, frame.pose, frame.x, frame.y, frame.flip);
     drawPetSprite(buffer, frame.toy, frame.toyX, frame.toyY, false);
-    if (heart) drawPetSprite(buffer, 20, frame.heartX>=0?frame.heartX:frame.x+12, 4 + (tick / 5) % 2, false);
+    if (heart) drawPetSprite(buffer, 20, frame.heartX>=0?frame.heartX:frame.x+12, heartY, false);
     lv_obj_invalidate(canvas);
-    rendered = frame; hasRendered = true; hadHeart = heart;
+    rendered = frame; hasRendered = true; renderedHeartY = heartY;
   }
   ++tick;
   if (++actionTick >= kPetFrameCounts[index]) {

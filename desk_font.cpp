@@ -3,6 +3,7 @@
 #include <new>
 #include <atomic>
 #include <cstring>
+#include <esp_timer.h>
 #include "sd_access.h"
 #include "event_log.h"
 
@@ -101,6 +102,11 @@ lv_font_t desk_font_88 = makeFont(&desk_blob_88, 99, 9, &lv_font_montserrat_14);
 
 static std::atomic<bool> sdMounted{false};
 static std::atomic<uint32_t> sdGlyphReads{0};
+static std::atomic<uint32_t> sdFontIoUs{0};
+
+extern "C" uint32_t desk_font_sd_io_us(void) {
+  return sdFontIoUs.load(std::memory_order_relaxed);
+}
 static bool builtinSymbolDsc(const lv_font_t *,lv_font_glyph_dsc_t *dsc,uint32_t letter,uint32_t next) {
   if(letter<0xF000 || letter>0xF8FF)return false;
   return lv_font_montserrat_14.get_glyph_dsc(&lv_font_montserrat_14,dsc,letter,next);
@@ -128,19 +134,24 @@ static lv_fs_res_t sdFontClose(lv_fs_drv_t *, void *handle) {
 
 static lv_fs_res_t sdFontRead(lv_fs_drv_t *, void *handle, void *buffer,
                               uint32_t count, uint32_t *readCount) {
+  const int64_t started = esp_timer_get_time();
   sdGlyphReads.fetch_add(1);
   DeskSdLock lock;
   *readCount = static_cast<File *>(handle)->read(static_cast<uint8_t *>(buffer), count);
+  sdFontIoUs.fetch_add((uint32_t)(esp_timer_get_time() - started), std::memory_order_relaxed);
   return LV_FS_RES_OK;
 }
 
 static lv_fs_res_t sdFontSeek(lv_fs_drv_t *, void *handle, uint32_t offset,
                               lv_fs_whence_t whence) {
+  const int64_t started = esp_timer_get_time();
   DeskSdLock lock;
   File *file = static_cast<File *>(handle);
   SeekMode mode = whence == LV_FS_SEEK_CUR ? SeekCur :
                   whence == LV_FS_SEEK_END ? SeekEnd : SeekSet;
-  return file->seek(offset, mode) ? LV_FS_RES_OK : LV_FS_RES_FS_ERR;
+  const bool okay = file->seek(offset, mode);
+  sdFontIoUs.fetch_add((uint32_t)(esp_timer_get_time() - started), std::memory_order_relaxed);
+  return okay ? LV_FS_RES_OK : LV_FS_RES_FS_ERR;
 }
 
 static lv_fs_res_t sdFontTell(lv_fs_drv_t *, void *handle, uint32_t *position) {
